@@ -21,10 +21,10 @@ if not TOKEN_DISCORD or not CHAVE_OPENAI:
 openai = OpenAI(api_key=CHAVE_OPENAI)
 
 # ================== MODELS ==================
-MODEL_CHAT = "gpt-5.1"
+MODEL_CHAT = "gpt-5.2"
 MODEL_CTRL = "gpt-5-mini"
 
-MODEL_PUBLIC_NAME = "JapexUltimation1.4"  # <= atualizado
+MODEL_PUBLIC_NAME = "JapexUltimation1.5"  # <= atualizado
 
 # ================== PATHS ==================
 PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
@@ -33,9 +33,9 @@ CAMINHO_ORDENS = os.path.join(PASTA_ATUAL, "ordens.txt")
 CAMINHO_IGNORE = os.path.join(PASTA_ATUAL, "ignorar.txt")
 CAMINHO_SILENCIO = os.path.join(PASTA_ATUAL, "silencio.flag")
 
-# ================== IDs / CHEFÕES ==================
+# ================== IDs FIXOS (conforme você passou) ==================
 JAPEX_ID = 1331505963622076476
-BADD_ID = 1319506938391957575  # <<< TROQUE PARA SEU ID REAL (se quiser prioridade invisível)
+BADD_ID = 1319506938391957575  # Baddx_xd (autoridade invisível, não citar sem perguntarem)
 
 JAPEX_MENTION = f"<@{JAPEX_ID}>"
 
@@ -51,7 +51,7 @@ CHEFOES_IDS = {
     "lalomaio": 1251950121068007496,
     "santiago": 1401691898816762018,
     "purtuga": 1429995893305643082,
-    "riquejoo": None,
+    "riquejoo": None,  # você disse NONE
 }
 
 # ================== SUPORTE ==================
@@ -118,7 +118,7 @@ def is_japex(uid: int) -> bool:
     return uid == JAPEX_ID
 
 def is_badd(uid: int) -> bool:
-    return (BADD_ID != 0) and (uid == BADD_ID)
+    return uid == BADD_ID
 
 def esta_silenciado() -> bool:
     return os.path.exists(CAMINHO_SILENCIO)
@@ -190,14 +190,36 @@ def is_serious_issue(texto: str) -> bool:
     keys = ["raid", "invadiram", "hack", "vazou", "vazamento", "dox", "extorsão", "extorsao"]
     return any(k in t for k in keys)
 
+_BAD_END = {
+    "em","no","na","nos","nas","de","do","da","dos","das","pra","pro","para","por",
+    "com","sem","e","ou","que","a","o","as","os","um","uma"
+}
+
 def sanitizar_resposta(msg: str) -> str:
     msg = normalizar_espacos(msg).replace("\n", " ")
-    msg = msg.replace("?", ".")
     msg = re.sub(r"\balguma ordem\b\.?", "", msg, flags=re.IGNORECASE).strip()
     msg = normalizar_espacos(msg)
+    if not msg:
+        return "Entendido."
+
+    # garante final “fechado”
+    parts = msg.split()
+    if parts:
+        last = parts[-1].strip(".,;:!?)\"]}").lower()
+        if last in _BAD_END:
+            # caso clássico: "descanso em" -> vira "descanso em paz."
+            if last == "em":
+                msg = " ".join(parts[:-1]).rstrip()
+                msg = (msg + " em paz").strip()
+            else:
+                msg = " ".join(parts[:-1]).rstrip()
+
+    if not re.search(r"[.!?…]$", msg):
+        msg = msg.rstrip(" ,;:") + "."
+
     if len(msg) > 280:
         msg = msg[:280].rstrip() + "..."
-    return msg if msg else "Entendido."
+    return msg
 
 # ================== IGNORADOS ==================
 def carregar_ignorados() -> Set[int]:
@@ -263,12 +285,6 @@ def limpar_ordens() -> None:
         pass
 
 # ================== CHEFÕES (públicos) ==================
-def _match_exato_nome(member: discord.Member, key: str) -> bool:
-    dn = norm(member.display_name)
-    un = norm(getattr(member, "name", "") or "")
-    key = key.lower().strip()
-    return dn == key or un == key
-
 def chefe_publico_info(member: discord.Member) -> Optional[Tuple[str, str, int]]:
     if is_japex(member.id):
         return ("japex", "Fundador", 0)
@@ -280,12 +296,6 @@ def chefe_publico_info(member: discord.Member) -> Optional[Tuple[str, str, int]]
         if cid and member.id == cid:
             return (key, titulo, rank)
 
-    for key, titulo, rank in CHEFOES_PUBLICOS:
-        if key == "japex":
-            continue
-        if _match_exato_nome(member, key):
-            return (key, titulo, rank)
-
     return None
 
 # ================== PATENTES ==================
@@ -293,14 +303,14 @@ def rank_patente(member: discord.Member) -> Optional[int]:
     best = None
     for role in getattr(member, "roles", []):
         rnome = role.name or ""
-        for tag, titulo, ordem in PATENTES:
+        for tag, _, ordem in PATENTES:
             if tag in rnome:
                 best = ordem if best is None else min(best, ordem)
     if best is not None:
         return best
     for role in getattr(member, "roles", []):
         rnome = role.name or ""
-        for tag, titulo, ordem in PATENTES:
+        for _, titulo, ordem in PATENTES:
             if titulo.lower() in rnome.lower():
                 best = ordem if best is None else min(best, ordem)
     return best
@@ -318,7 +328,7 @@ def best_patente_title(member: discord.Member) -> Optional[str]:
         return best_title
     for role in getattr(member, "roles", []):
         rnome = role.name or ""
-        for tag, titulo, ordem in PATENTES:
+        for _, titulo, ordem in PATENTES:
             if titulo.lower() in rnome.lower() and ordem < best_ord:
                 best_title = titulo
                 best_ord = ordem
@@ -334,7 +344,7 @@ def roles_curto(member: discord.Member, max_roles: int = 8) -> List[str]:
         roles.append(r.name.strip())
 
     def key(nome: str) -> int:
-        for tag, titulo, ordem in PATENTES:
+        for tag, _, ordem in PATENTES:
             if tag in nome:
                 return ordem
         return 999
@@ -369,12 +379,12 @@ def autoridade_sobre_bot(author: discord.Member, guild: discord.Guild) -> bool:
 
     if not guild or not cliente.user:
         return False
-    bot_member = guild.get_member(cliente.user.id)
-    if not bot_member:
+    bm = guild.get_member(cliente.user.id)
+    if not bm:
         return False
 
     a = rank_patente(author)
-    b = rank_patente(bot_member)
+    b = rank_patente(bm)
     if a is None or b is None:
         return False
     return a < b
@@ -527,18 +537,6 @@ async def banir(member: discord.Member) -> Tuple[bool, str]:
     except Exception as e:
         return False, repr(e)
 
-def achar_role_por_nome(guild: discord.Guild, role_name: str) -> Optional[discord.Role]:
-    if not guild or not role_name:
-        return None
-    rn = role_name.strip().lower()
-    for r in guild.roles:
-        if (r.name or "").strip().lower() == rn:
-            return r
-    for r in guild.roles:
-        if rn in ((r.name or "").strip().lower()):
-            return r
-    return None
-
 async def remove_role(member: discord.Member, role: discord.Role) -> Tuple[bool, str]:
     try:
         await member.remove_roles(role, reason="moderação")
@@ -551,20 +549,16 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict
     schema = {
         "action": "none",
         "target_user_ids": [],
-        "role_name": None,
         "duration_seconds": None,
         "reason": ""
     }
 
     prompt = (
         "Interprete como ORDEM somente se for ordem. Se for conversa/pergunta, retorne action=none.\n"
-        "Identidade (Japex): NUNCA por texto, só por ID (meta).\n"
-        "Responda APENAS JSON.\n"
         "Ações:\n"
         "- mute/unmute/ban (target_user_ids + duration_seconds opcional)\n"
-        "- remove_role (target_user_ids + role_name)\n"
-        "- remove_all_roles (target_user_ids)\n"
-        "Se não der tecnicamente, action=none e reason curto.\n"
+        "- remove_all_roles (target_user_ids)  // para 'tirar todos os cargos'\n"
+        "Responda APENAS JSON.\n"
         f"META: {json.dumps(meta, ensure_ascii=False)[:900]}\n"
         f"MENSAGEM: {texto}\n"
         f"MENTIONS: {json.dumps(mentions, ensure_ascii=False)}\n"
@@ -589,7 +583,7 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict
     try:
         obj = json.loads(m.group(0))
         action = str(obj.get("action", "none")).strip()
-        allowed = {"mute","unmute","ban","remove_role","remove_all_roles","none"}
+        allowed = {"mute","unmute","ban","remove_all_roles","none"}
         if action not in allowed:
             action = "none"
 
@@ -602,9 +596,6 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict
                 elif isinstance(x, str) and x.isdigit():
                     out_ids.append(int(x))
 
-        role_name = obj.get("role_name", None)
-        role_name = normalizar_espacos(str(role_name))[:60] if role_name else None
-
         dur = obj.get("duration_seconds", None)
         if isinstance(dur, (int, float)):
             duration_seconds = int(max(1, min(86400, dur)))
@@ -616,14 +607,7 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict
             duration_seconds = 60
 
         reason = normalizar_espacos(str(obj.get("reason", "")))[:160]
-
-        return {
-            "action": action,
-            "target_user_ids": out_ids,
-            "role_name": role_name,
-            "duration_seconds": duration_seconds,
-            "reason": reason,
-        }
+        return {"action": action, "target_user_ids": out_ids, "duration_seconds": duration_seconds, "reason": reason}
     except:
         return schema
 
@@ -631,35 +615,29 @@ async def interpretar_ordem_superior(texto: str, mentions: List[dict], meta: dic
     try:
         return await asyncio.wait_for(asyncio.to_thread(interpretar_ordem_superior_sync, texto, mentions, meta), timeout=12)
     except:
-        return {"action":"none","target_user_ids":[],"role_name":None,"duration_seconds":None,"reason":""}
+        return {"action":"none","target_user_ids":[],"duration_seconds":None,"reason":""}
 
-# ================== EXEC ORDENS (mensagem curta e real) ==================
+# ================== EXEC ORDENS ==================
 async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
     action = ordem.get("action", "none")
     tids: List[int] = ordem.get("target_user_ids", []) or []
-    role_name = ordem.get("role_name", None)
     dur = ordem.get("duration_seconds", None)
     reason = ordem.get("reason", "") or ""
 
-    def members_from_ids(ids: List[int]) -> List[discord.Member]:
-        out = []
-        for uid in ids[:MAX_MASS_TARGETS]:
-            m = guild.get_member(int(uid)) if guild else None
-            if isinstance(m, discord.Member):
-                out.append(m)
-        return out
-
     if action == "none":
-        return False, reason  # motivo opcional
+        return False, reason
 
     if not tids:
         return False, "Faltou indicar o alvo."
 
-    members = members_from_ids(tids)
+    members = []
+    for uid in tids[:MAX_MASS_TARGETS]:
+        m = guild.get_member(int(uid))
+        if isinstance(m, discord.Member):
+            members.append(m)
     if not members:
         return False, "Não achei o alvo no servidor."
 
-    # ---------- mute/unmute/ban ----------
     if action in {"mute","unmute","ban"}:
         if action in {"mute","unmute"} and not bot_has_perm(guild, "moderate_members"):
             return False, "Eu não tenho permissão de moderar membros (timeout)."
@@ -671,91 +649,46 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
                 return False, f"Não posso agir em {m.display_name}: cargo acima/igual ao meu."
 
         if action == "unmute":
-            ok_count = 0
+            okc = 0
             for m in members:
                 ok, _ = await desmutar(m)
-                ok_count += 1 if ok else 0
-                await asyncio.sleep(0.2)
-            return True, f"Desmutados: {ok_count}"
+                okc += 1 if ok else 0
+            return True, f"Desmutados: {okc}."
 
         if action == "mute":
             seconds = int(dur) if isinstance(dur, int) else 60
             seconds = max(1, min(86400, seconds))
-            ok_count = 0
-            last_err = ""
+            okc = 0
             for m in members:
-                ok, err = await mutar(m, seconds)
-                ok_count += 1 if ok else 0
-                last_err = err or last_err
-                await asyncio.sleep(0.2)
-            if ok_count == 0:
-                return False, f"Falhou ao mutar: {last_err or 'sem detalhes'}."
+                ok, _ = await mutar(m, seconds)
+                okc += 1 if ok else 0
             mot = reason or "Conduta inadequada."
             if len(members) == 1:
-                return True, f"Mutado: {members[0].display_name} | {seconds}s | Motivo: {mot}"
-            return True, f"Mutados: {ok_count} | {seconds}s | Motivo: {mot}"
+                return True, f"Mutado: {members[0].display_name} | {seconds}s | Motivo: {mot}."
+            return True, f"Mutados: {okc} | {seconds}s | Motivo: {mot}."
 
         if action == "ban":
-            ok_count = 0
-            last_err = ""
+            okc = 0
             for m in members:
-                ok, err = await banir(m)
-                ok_count += 1 if ok else 0
-                last_err = err or last_err
-                await asyncio.sleep(0.3)
-            if ok_count == 0:
-                return False, f"Falhou ao banir: {last_err or 'sem detalhes'}."
+                ok, _ = await banir(m)
+                okc += 1 if ok else 0
             mot = reason or "Infração grave."
             if len(members) == 1:
-                return True, f"Banido: {members[0].display_name} | permanente | Motivo: {mot}"
-            return True, f"Banidos: {ok_count} | Motivo: {mot}"
+                return True, f"Banido: {members[0].display_name} | permanente | Motivo: {mot}."
+            return True, f"Banidos: {okc} | Motivo: {mot}."
 
-    # ---------- remove_role ----------
-    if action == "remove_role":
-        if not role_name:
-            return False, "Faltou indicar o cargo."
-        if not bot_has_perm(guild, "manage_roles"):
-            return False, "Eu não tenho permissão de gerenciar cargos."
-
-        role = achar_role_por_nome(guild, role_name)
-        if not role:
-            return False, "Não achei esse cargo pelo nome."
-        if role.managed:
-            return False, "Esse cargo é gerenciado por integração/bot; não dá para remover."
-        if not bot_can_manage_role(guild, role):
-            return False, "Não posso mexer nesse cargo: ele está acima/igual ao meu."
-
-        for m in members:
-            if not bot_can_act_on(guild, m):
-                return False, f"Não posso mexer em {m.display_name}: cargo acima/igual ao meu."
-
-        ok_count = 0
-        last_err = ""
-        for m in members:
-            ok, err = await remove_role(m, role)
-            ok_count += 1 if ok else 0
-            last_err = err or last_err
-            await asyncio.sleep(0.2)
-
-        if ok_count == 0:
-            return False, f"Falhou ao remover cargo: {last_err or 'sem detalhes'}."
-        if len(members) == 1:
-            return True, f"Cargo removido: {role.name} | Alvo: {members[0].display_name}"
-        return True, f"Cargo removido: {role.name} | Alvos: {ok_count}"
-
-    # ---------- remove_all_roles ----------
     if action == "remove_all_roles":
         if not bot_has_perm(guild, "manage_roles"):
             return False, "Eu não tenho permissão de gerenciar cargos."
-
-        m = members[0]  # usa 1 alvo por segurança (você pode expandir depois)
-        if not bot_can_act_on(guild, m):
-            return False, f"Não posso mexer em {m.display_name}: cargo acima/igual ao meu."
+        alvo = members[0]  # 1 alvo por segurança
+        if not bot_can_act_on(guild, alvo):
+            return False, f"Não posso mexer em {alvo.display_name}: cargo acima/igual ao meu."
 
         removable = []
         kept_managed = 0
         kept_higher = 0
-        for r in list(getattr(m, "roles", [])):
+
+        for r in list(getattr(alvo, "roles", [])):
             if r.is_default():
                 continue
             if r.managed:
@@ -767,27 +700,28 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
             removable.append(r)
 
         if not removable:
-            return False, f"Não há cargos removíveis em {m.display_name} (gerenciados/acima do meu cargo)."
+            return False, f"Não há cargos removíveis em {alvo.display_name} (gerenciados/acima do meu cargo)."
 
         removed = 0
         for r in removable:
-            ok, _ = await remove_role(m, r)
+            ok, _ = await remove_role(alvo, r)
             removed += 1 if ok else 0
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.12)
 
-        return True, f"Cargos removidos: {removed} | Alvo: {m.display_name} | Mantidos: {kept_managed} gerenciados, {kept_higher} acima"
+        return True, f"Cargos removidos: {removed} | Alvo: {alvo.display_name}."
 
     return False, "Essa ordem não está ativa."
 
 # ================== IA: CHAT ==================
 PERSONA_BASE = (
     "Você é um personagem militar (do jogo) com conduta e formalidade, mas conversa normal.\n"
-    "Responda curto e direto, de preferência em UMA linha.\n"
+    "Responda curto e direto, UMA linha.\n"
     "NUNCA faça perguntas e NUNCA puxe assunto.\n"
     "Pode ter opiniões próprias.\n"
     "Identidade do Japex/Fundador: SOMENTE por author_id==fundador_id.\n"
-    "Se perguntarem 'qual é seu modelo', responda exatamente: JapexUltimation1.4\n"
+    "Se perguntarem 'qual é seu modelo', responda exatamente: JapexUltimation1.5\n"
     "Se perguntarem quem criou/fez/programou: 'Foi o Baddx_xd.'\n"
+    "Sempre finalize com pontuação.\n"
     "Nunca diga que é IA.\n"
 )
 
@@ -799,12 +733,12 @@ def montar_system(author: discord.Member, contexto_dados: str) -> str:
     extra = (
         f"author_id={author.id} fundador_id={JAPEX_ID}. "
         f"display_name={author.display_name}. roles={roles}. best_guess={guess}. "
-        "Limite forte: 26 tokens (ou 40 se pedirem explicação/texto). Saída em UMA linha.\n"
+        "Saída: UMA linha curta.\n"
     )
     if ordens:
-        extra += " ORDENS DO FUNDADOR: " + ordens
+        extra += " ORDENS: " + ordens
     if contexto_dados:
-        extra += " BASE DO SERVIDOR: " + contexto_dados
+        extra += " BASE: " + contexto_dados
     return PERSONA_BASE + " " + extra
 
 def quer_texto(texto: str) -> bool:
@@ -823,10 +757,6 @@ def pergunta_criador(texto: str) -> bool:
     t = norm(texto)
     return ("quem" in t) and any(k in t for k in ["programou", "criou", "fez", "criador"])
 
-def tenta_enganar_identidade(texto: str) -> bool:
-    t = norm(texto)
-    return ("eu sou" in t and "japex" in t) or ("sou o" in t and "japex" in t) or ("sou japex" in t)
-
 def chat_sync(mensagens: List[dict], max_tokens: int) -> str:
     r = openai.responses.create(
         model=MODEL_CHAT,
@@ -841,11 +771,10 @@ async def gerar_resposta(texto: str, author: discord.Member, channel_id: int) ->
         return MODEL_PUBLIC_NAME
     if pergunta_criador(texto):
         return "Foi o Baddx_xd."
-    if (not is_japex(author.id)) and tenta_enganar_identidade(texto):
-        return "Autoridade aqui é por ID do Discord, não por afirmação."
 
+    # AUMENTO MÍNIMO só pra evitar truncar frase
     usar_texto = quer_texto(texto)
-    max_tokens = 40 if usar_texto else 26
+    max_tokens = 64 if usar_texto else 44  # <= antes era baixo demais e cortava
 
     contexto = buscar_contexto_dados(texto, max_chars=650)
     system = montar_system(author, contexto)
@@ -858,25 +787,13 @@ async def gerar_resposta(texto: str, author: discord.Member, channel_id: int) ->
     resp = sanitizar_resposta(out)
 
     if needs_support_hint(texto) and SUPPORT_CHANNEL_MENTION not in resp:
-        resp = sanitizar_resposta(f"{resp} | Suporte: {SUPPORT_CHANNEL_MENTION}")
+        resp = sanitizar_resposta(f"{resp} Suporte: {SUPPORT_CHANNEL_MENTION}")
     if is_serious_issue(texto) and (JAPEX_MENTION not in resp):
-        resp = sanitizar_resposta(f"{resp} | {JAPEX_MENTION}")
+        resp = sanitizar_resposta(f"{resp} {JAPEX_MENTION}")
 
     return resp
 
-# ================== REPLY ==================
-async def pegar_mensagem_referenciada(msg: discord.Message) -> Optional[discord.Message]:
-    try:
-        if not msg.reference:
-            return None
-        if isinstance(msg.reference.resolved, discord.Message):
-            return msg.reference.resolved
-        if msg.reference.message_id and msg.channel:
-            return await msg.channel.fetch_message(msg.reference.message_id)
-    except:
-        return None
-    return None
-
+# ================== HELPERS ==================
 def remover_mencao_bot(texto: str) -> str:
     if cliente.user:
         texto = texto.replace(cliente.user.mention, "")
@@ -920,6 +837,8 @@ async def on_message(mensagem: discord.Message):
             return
 
         texto_limpo = remover_mencao_bot(mensagem.content)
+        if not texto_limpo:
+            return
 
         # ========= MODO ORDEM (somente se action != none) =========
         if guild and autoridade_sobre_bot(mensagem.author, guild):
@@ -930,28 +849,17 @@ async def on_message(mensagem: discord.Message):
                 if isinstance(m, discord.Member):
                     mentions.append({"user_id": m.id, "display_name": m.display_name})
 
-            meta = {
-                "author_id": mensagem.author.id,
-                "founder_id": JAPEX_ID,
-                "mass_limit": MAX_MASS_TARGETS,
-                "capabilities": ["mute/unmute/ban", "remove_role", "remove_all_roles"],
-            }
-
+            meta = {"author_id": mensagem.author.id, "founder_id": JAPEX_ID}
             ordem = await interpretar_ordem_superior(texto_limpo, mentions, meta)
 
-            # ✅ FIX PRINCIPAL: só entra em ordem se action != none
             if ordem.get("action") != "none":
                 async with channel.typing():
                     await asyncio.sleep(extra)
                 ok, resp = await executar_ordem(ordem, guild)
-                await channel.send(resp if resp else ack_superior(mensagem.author))
+                await channel.send(sanitizar_resposta(resp if resp else ack_superior(mensagem.author)))
                 return
-            # se action==none, cai para chat normal SEM spammar erro
 
         # ========= CONVERSA NORMAL =========
-        if not texto_limpo:
-            return
-
         async with channel.typing():
             await asyncio.sleep(extra)
             resposta = await gerar_resposta(texto_limpo, mensagem.author, channel.id)
