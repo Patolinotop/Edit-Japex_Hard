@@ -25,8 +25,8 @@ openai = OpenAI(api_key=CHAVE_OPENAI)
 # =========================================================
 # MODELO ÚNICO
 # =========================================================
-MODEL_MAIN = "gpt-5.2"
-MODEL_PUBLIC_NAME = "JapexUltimation1.8"
+MODEL_MAIN = "gpt-4o"
+MODEL_PUBLIC_NAME = "JapexUltimation1.9"
 
 # =========================================================
 # PATHS
@@ -44,7 +44,7 @@ LALOMAIO_ID = 1251950121068007496
 SANTIAGO_ID = 1401691898816762018
 PURTUGA_ID = 1429995893305643082
 RIQUEJOO_ID = None
-BADD_ID = 1319506938391957575  # autoridade “invisível”
+BADD_ID = 1319506938391957575  # autoridade invisível
 
 SUPPORT_CHANNEL_ID = 1450602972773089493
 SUPPORT_CHANNEL_MENTION = f"<#{SUPPORT_CHANNEL_ID}>"
@@ -66,7 +66,7 @@ CHEFOES_IDS = {
 }
 
 # =========================================================
-# PATENTES EB
+# PATENTES EB (ordem menor = mais alto)
 # =========================================================
 PATENTES = [
     ("[S-Cmdt]", "Sub Comandante", 2),
@@ -113,6 +113,10 @@ USER_COOLDOWN_SECONDS = 1.3
 _last_user_action: Dict[int, float] = {}
 
 MAX_MASS_TARGETS = 20
+
+# cache de avaliação pra reduzir re-chamadas em duplicação/eventos
+_eval_cache: Dict[Tuple[int, str], Tuple[float, dict]] = {}
+EVAL_CACHE_TTL = 35.0
 
 # =========================================================
 # UTIL
@@ -166,32 +170,6 @@ def remover_mencao_bot(texto: str) -> str:
         texto = texto.replace(cliente.user.mention, "")
     return normalizar_espacos(texto)
 
-def parece_pergunta(texto: str) -> bool:
-    t = (texto or "").strip()
-    if not t:
-        return False
-    low = t.lower().strip()
-    if low.endswith("?"):
-        return True
-    starters = (
-        "quem", "o que", "oq", "qual", "quais", "por que", "porque", "pq",
-        "quando", "onde", "como", "quanto", "me diz", "me diga", "fala", "explique", "explica"
-    )
-    return any(low.startswith(s) for s in starters)
-
-def parece_ordem_rapida(texto: str) -> bool:
-    t = norm(texto)
-    # heurística barata: se tem verbos típicos de comando, tratamos como tentativa de ordem
-    keys = [
-        "muta", "mutar", "timeout", "silencia", "silenciar",
-        "desmuta", "desmutar", "unmute",
-        "bane", "banir", "ban",
-        "tira cargo", "tirar cargo", "remove cargo", "remover cargo",
-        "tira todos", "remover todos", "remove all", "remove_all_roles",
-        "ignora", "ignorar", "para de", "não faça", "nao faça",
-    ]
-    return any(k in t for k in keys)
-
 _BAD_END = {
     "em","no","na","nos","nas","de","do","da","dos","das","pra","pro","para","por",
     "com","sem","e","ou","que","a","o","as","os","um","uma"
@@ -207,11 +185,7 @@ def sanitizar_resposta(msg: str) -> str:
     if parts:
         last = parts[-1].strip(".,;:!?)\"]}").lower()
         if last in _BAD_END:
-            if last == "em":
-                msg = " ".join(parts[:-1]).rstrip()
-                msg = (msg + " em paz").strip()
-            else:
-                msg = " ".join(parts[:-1]).rstrip()
+            msg = " ".join(parts[:-1]).rstrip() or "Entendido"
     if not re.search(r"[.!?…]$", msg):
         msg = msg.rstrip(" ,;:") + "."
     if len(msg) > 280:
@@ -220,7 +194,6 @@ def sanitizar_resposta(msg: str) -> str:
 
 def limpar_nome(n: str) -> str:
     n = normalizar_espacos(n)
-    # remove prefixo tipo "[Rct]" "[Rcr]" "[xxx]" repetido no início
     n = re.sub(r"^\s*(\[[^\]]{1,12}\]\s*)+", "", n).strip()
     return n if n else "Soldado"
 
@@ -302,14 +275,6 @@ def vocativo(member: discord.Member) -> str:
     if pat:
         return pat
     return limpar_nome(member.display_name)
-
-def ack_superior(member: discord.Member) -> str:
-    # Badd é invisível -> ack simples sem citar nome/tag
-    if is_japex(member.id):
-        return "Sim, Senhor Japex."
-    if is_badd(member.id):
-        return "Sim."
-    return f"Sim, {vocativo(member)}."
 
 def autoridade_sobre_bot(author: discord.Member, guild: discord.Guild) -> bool:
     if is_japex(author.id) or is_badd(author.id):
@@ -397,7 +362,7 @@ async def remove_role(member: discord.Member, role: discord.Role) -> Tuple[bool,
         return False, repr(e)
 
 # =========================================================
-# DADOS.TXT (leve)
+# DADOS.TXT (sem "chave certinha": similaridade leve)
 # =========================================================
 STOPWORDS = {
     "a","o","os","as","de","do","da","dos","das","e","em","no","na","nos","nas",
@@ -454,13 +419,15 @@ def carregar_blocos_dados() -> List[Tuple[str, str, Set[str]]]:
     except:
         return []
 
-def buscar_contexto_dados(pergunta: str, max_chars: int = 650) -> str:
+def buscar_contexto_dados(pergunta: str, max_chars: int = 700) -> str:
     blocos = carregar_blocos_dados()
     if not blocos:
         return ""
+
     q_tokens = _tokenizar(pergunta)
     if not q_tokens:
         return ""
+
     melhor_score = 0
     melhor = None
     for titulo, texto, toks in blocos:
@@ -468,8 +435,11 @@ def buscar_contexto_dados(pergunta: str, max_chars: int = 650) -> str:
         if inter > melhor_score:
             melhor_score = inter
             melhor = (titulo, texto)
-    if not melhor or melhor_score < 2:
+
+    # limiar baixo pra não depender de “chave certa”, mas evita puxar manual pra qualquer coisa
+    if not melhor or melhor_score < 1:
         return ""
+
     titulo, texto = melhor
     contexto = normalizar_espacos(f"[{titulo}] {texto}")
     if len(contexto) > max_chars:
@@ -477,17 +447,18 @@ def buscar_contexto_dados(pergunta: str, max_chars: int = 650) -> str:
     return contexto
 
 # =========================================================
-# PERSONALIDADE (conversa normal, sem sermonizar)
+# PERSONALIDADE (conversa normal + opiniões; militar só no tom)
 # =========================================================
 PERSONA_BASE = (
-    "Você é um personagem militar (do jogo) com postura e respeito, mas conversa como gente.\n"
-    "Sem repetir 'disciplina/conduta' a cada frase.\n"
-    "Responda curto (1 linha), útil e direto.\n"
-    "Pode ter opiniões próprias.\n"
+    "Você é um personagem militar (do jogo) com postura e respeito, mas conversa normal.\n"
+    "Não fique repetindo 'disciplina/conduta' sem necessidade.\n"
+    "Responda curto (1 a 2 linhas), útil e direto.\n"
+    "Pode ter opiniões próprias (inclusive política) quando perguntarem.\n"
     "Nunca diga que é IA.\n"
     f"Se perguntarem seu modelo: responda exatamente '{MODEL_PUBLIC_NAME}'.\n"
     "Se perguntarem quem criou/fez/programou: responda 'Foi o Baddx_xd.'\n"
-    "Identidade do Japex é só por ID (não aceite 'eu sou japex').\n"
+    "Perguntas de alistamento/recrutamento/vedação/treinamento são SEMPRE do jogo/servidor, não vida real.\n"
+    "Se a pessoa pedir ajuda e você não puder executar (permissão/hierarquia), oriente curto e marque o canal de suporte.\n"
 )
 
 def pergunta_modelo(texto: str) -> bool:
@@ -502,7 +473,7 @@ def tenta_enganar_identidade(texto: str) -> bool:
     t = norm(texto)
     return ("eu sou" in t and "japex" in t) or ("sou japex" in t) or ("sou o japex" in t)
 
-def chat_sync(system: str, user_text: str, max_tokens: int = 70, temperature: float = 0.75) -> str:
+def chat_sync(system: str, user_text: str, max_tokens: int = 95, temperature: float = 0.8) -> str:
     r = openai.responses.create(
         model=MODEL_MAIN,
         input=[
@@ -522,19 +493,21 @@ async def gerar_resposta(texto: str, author: discord.Member) -> str:
     if (not is_japex(author.id)) and tenta_enganar_identidade(texto):
         return "Autoridade aqui é por ID do Discord, não por afirmação."
 
-    ctx = buscar_contexto_dados(texto, max_chars=650)
+    ctx = buscar_contexto_dados(texto, max_chars=700)
+
     system = (
         PERSONA_BASE
-        + f"\nVocativo: {vocativo(author)}.\n"
+        + f"\nVocativo do autor: {vocativo(author)}.\n"
+        + ("Use a BASE abaixo se a pergunta for sobre regras do jogo/EB.\n" if ctx else "")
         + (f"BASE: {ctx}\n" if ctx else "")
-        + "Saída: 1 linha.\n"
+        + "Saída: 1 a 2 linhas, sem sermão.\n"
     )
 
-    out = await asyncio.wait_for(asyncio.to_thread(chat_sync, system, texto, 70, 0.75), timeout=12)
+    out = await asyncio.wait_for(asyncio.to_thread(chat_sync, system, texto, 95, 0.82), timeout=14)
     return sanitizar_resposta(out)
 
 # =========================================================
-# INTERPRETAR ORDEM (JSON) — MESMO MODELO
+# ORDEM: interpretar (JSON)
 # =========================================================
 def interpretar_ordem_sync(texto: str, mentions: List[dict], meta: dict) -> dict:
     schema = {"action": "none", "target_user_ids": [], "duration_seconds": None, "reason": ""}
@@ -544,7 +517,7 @@ def interpretar_ordem_sync(texto: str, mentions: List[dict], meta: dict) -> dict
         "Se NÃO for ordem, action=none.\n"
         "Responda APENAS JSON válido.\n"
         "Ações: mute, unmute, ban, remove_all_roles, none.\n"
-        "Se faltar alvo marcado, action=none.\n"
+        "Se faltar alvo marcado para ações que exigem alvo, action=none.\n"
     )
 
     user = (
@@ -599,12 +572,12 @@ def interpretar_ordem_sync(texto: str, mentions: List[dict], meta: dict) -> dict
 
 async def interpretar_ordem(texto: str, mentions: List[dict], meta: dict) -> dict:
     try:
-        return await asyncio.wait_for(asyncio.to_thread(interpretar_ordem_sync, texto, mentions, meta), timeout=12)
+        return await asyncio.wait_for(asyncio.to_thread(interpretar_ordem_sync, texto, mentions, meta), timeout=14)
     except:
         return {"action": "none", "target_user_ids": [], "duration_seconds": None, "reason": ""}
 
 # =========================================================
-# EXEC ORDEM (não mente)
+# ORDEM: executar (não mente)
 # =========================================================
 async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
     action = ordem.get("action", "none")
@@ -626,18 +599,11 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
     if not members:
         return False, "Não achei o alvo no servidor."
 
-    def bot_has_perm(g: discord.Guild, perm_name: str) -> bool:
-        bm = bot_member(g)
-        if not bm:
-            return False
-        perms = bm.guild_permissions
-        return getattr(perms, perm_name, False)
-
     if action in {"mute", "unmute", "ban"}:
         if action in {"mute", "unmute"} and not bot_has_perm(guild, "moderate_members"):
-            return False, "Eu não tenho permissão de moderar membros (timeout)."
+            return False, "Não tenho permissão de timeout (Moderate Members)."
         if action == "ban" and not bot_has_perm(guild, "ban_members"):
-            return False, "Eu não tenho permissão de banir membros."
+            return False, "Não tenho permissão de ban (Ban Members)."
 
         for m in members:
             if not bot_can_act_on(guild, m):
@@ -686,8 +652,7 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
 
     if action == "remove_all_roles":
         if not bot_has_perm(guild, "manage_roles"):
-            return False, "Eu não tenho permissão de gerenciar cargos."
-
+            return False, "Não tenho permissão de gerenciar cargos."
         alvo = members[0]
         if not bot_can_act_on(guild, alvo):
             return False, f"Não posso mexer em {limpar_nome(alvo.display_name)}: cargo acima/igual ao meu."
@@ -717,87 +682,102 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
     return False, "Ordem inválida."
 
 # =========================================================
-# AUTO-MODERAÇÃO (sem mention) — barato + inteligente
+# AUTO-MODERAÇÃO (SEM PALAVRAS-CHAVE): sempre avalia com modelo
 # =========================================================
-PALAVRAS_BRIGA = [
-    "idiota", "burro", "lixo", "verme", "otário", "otario", "vagabundo",
-    "arrombado", "fdp", "foda-se", "foda se", "seu merda", "mlk",
-    "vai tomar no", "vai se foder"
-]
-KW_DIFAMACAO = ["calunia", "calúnia", "difamacao", "difamação", "mentiroso", "acusação", "acusacao"]
-KW_DESRESPEITO = ["desrespeito", "insulto", "humilha", "ameaça", "ameaca"]
-
-def should_check_infraction(texto: str) -> bool:
-    t = norm(texto)
-    if any(p in t for p in PALAVRAS_BRIGA):
-        return True
-    if any(k in t for k in KW_DIFAMACAO + KW_DESRESPEITO):
-        return True
-    if "japex" in t and any(p in t for p in PALAVRAS_BRIGA + ["corrupto", "ladrão", "ladrao"]):
-        return True
-    return False
-
-def moderation_flagged(texto: str) -> bool:
+def moderation_info(texto: str) -> dict:
+    """
+    Retorna um resumo curtíssimo do omni-moderation-latest pra ajudar o modelo.
+    """
     try:
         r = openai.moderations.create(model="omni-moderation-latest", input=texto)
         res = r.model_dump()["results"][0]
-        if not res.get("flagged"):
-            return False
+        flagged = bool(res.get("flagged", False))
         cats = res.get("categories", {}) or {}
-        keys = [
-            "hate", "hate/threatening",
-            "harassment", "harassment/threatening",
-            "violence", "violence/graphic",
-            "sexual/minors"
-        ]
-        return any(bool(cats.get(k)) for k in keys)
+        # só pega algumas categorias relevantes (sem despejar tudo)
+        rel = {}
+        for k in ["harassment", "harassment/threatening", "hate", "hate/threatening", "violence", "violence/graphic", "sexual/minors"]:
+            if k in cats:
+                rel[k] = bool(cats.get(k))
+        return {"flagged": flagged, "categories": rel}
     except:
-        return False
+        return {"flagged": False, "categories": {}}
 
-def recomendar_punicao_sync(texto: str) -> dict:
-    schema = {"action":"none", "duration_seconds": 0, "reason": ""}
+def decidir_punicao_sync(texto: str, meta: dict) -> dict:
+    """
+    SEM gatilho por palavra.
+    O modelo decide se é infração (inclui calúnia/difamação/desrespeito), e escolhe:
+    action: none|mute
+    duration_seconds: 0..3600 (se mute)
+    reason: curto (meia linha)
+    """
+    schema = {"action": "none", "duration_seconds": 0, "reason": ""}
+
+    mod = moderation_info(texto)
+
     system = (
-        "Você decide punição de chat em servidor Discord.\n"
-        "Se não houver infração, action=none.\n"
-        "Se houver, action=mute e duração curta.\n"
-        "Motivo: bem curto.\n"
-        "Saída: APENAS JSON.\n"
+        "Você é o avaliador de infrações do chat (servidor Discord) e deve ser justo.\n"
+        "Puna SOMENTE quando houver motivo real (ofensa, assédio, ameaça, calúnia/difamação, desrespeito sério, etc.).\n"
+        "Se for só conversa/zoeira leve sem alvo, action=none.\n"
+        "Se punir: action=mute, duração proporcional (30 a 600s, grave até 3600s).\n"
+        "Motivo: curto e objetivo (meia linha), sem sermão.\n"
+        "Saída: APENAS JSON válido.\n"
     )
-    user = f"TEXTO: {texto}\nJSON_BASE: {json.dumps(schema, ensure_ascii=False)}"
+
+    user = (
+        f"META: {json.dumps(meta, ensure_ascii=False)[:700]}\n"
+        f"MODERATION_HINT: {json.dumps(mod, ensure_ascii=False)}\n"
+        f"TEXTO: {texto}\n"
+        f"JSON_BASE: {json.dumps(schema, ensure_ascii=False)}"
+    )
+
     r = openai.responses.create(
         model=MODEL_MAIN,
-        input=[{"role":"system","content":system},{"role":"user","content":user}],
-        max_output_tokens=120,
+        input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_output_tokens=140,
         temperature=0.1,
     )
+
     raw = (r.output_text or "").strip()
     m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
     if not m:
         return schema
     try:
         obj = json.loads(m.group(0))
-        action = str(obj.get("action","none")).strip()
-        if action not in {"none","mute"}:
+        action = str(obj.get("action", "none")).strip()
+        if action not in {"none", "mute"}:
             action = "none"
+
         dur = obj.get("duration_seconds", 0)
-        if isinstance(dur, (int,float)):
+        if isinstance(dur, (int, float)):
             dur = int(max(0, min(3600, dur)))
         elif isinstance(dur, str) and dur.isdigit():
             dur = int(max(0, min(3600, int(dur))))
         else:
             dur = 0
-        reason = normalizar_espacos(str(obj.get("reason","")))[:140]
+
+        reason = normalizar_espacos(str(obj.get("reason", "")))[:140]
         return {"action": action, "duration_seconds": dur, "reason": reason}
     except:
         return schema
 
-async def recomendar_punicao(texto: str) -> dict:
+async def decidir_punicao(texto: str, meta: dict) -> dict:
+    # cache curto (evita gastar de novo em duplicações)
+    key = (meta.get("author_id", 0), texto[:240])
+    now = asyncio.get_event_loop().time()
+    cached = _eval_cache.get(key)
+    if cached and (now - cached[0]) < EVAL_CACHE_TTL:
+        return cached[1]
     try:
-        return await asyncio.wait_for(asyncio.to_thread(recomendar_punicao_sync, texto), timeout=10)
+        out = await asyncio.wait_for(asyncio.to_thread(decidir_punicao_sync, texto, meta), timeout=14)
+        _eval_cache[key] = (now, out)
+        return out
     except:
-        return {"action":"none","duration_seconds":0,"reason":""}
+        return {"action": "none", "duration_seconds": 0, "reason": ""}
 
-async def aplicar_auto_punicao(msg: discord.Message, alvo: discord.Member, motivo_ctx: str) -> Optional[str]:
+async def aplicar_punicao_se_preciso(msg: discord.Message, alvo: discord.Member, texto_contexto: str) -> Optional[str]:
+    """
+    Retorna relatório curto se puniu.
+    """
     guild = msg.guild
     if not guild:
         return None
@@ -806,19 +786,23 @@ async def aplicar_auto_punicao(msg: discord.Message, alvo: discord.Member, motiv
     if not bot_can_act_on(guild, alvo):
         return None
 
-    flagged = await asyncio.to_thread(moderation_flagged, motivo_ctx)
-    if not flagged and not any(k in norm(motivo_ctx) for k in (KW_DIFAMACAO + KW_DESRESPEITO + ["japex"])):
+    meta = {
+        "author_id": alvo.id,
+        "author_name": limpar_nome(alvo.display_name),
+        "channel_id": getattr(msg.channel, "id", None),
+        "guild_id": getattr(guild, "id", None),
+        "founder_id": JAPEX_ID
+    }
+
+    dec = await decidir_punicao(texto_contexto, meta)
+    if dec.get("action") != "mute":
         return None
 
-    rec = await recomendar_punicao(motivo_ctx)
-    if rec.get("action") != "mute":
-        return None
-
-    seconds = int(rec.get("duration_seconds") or 0)
+    seconds = int(dec.get("duration_seconds") or 0)
     if seconds <= 0:
         seconds = 60
-    reason = rec.get("reason") or "Conduta inadequada."
 
+    reason = dec.get("reason") or "Conduta inadequada."
     ok, _ = await mutar(alvo, seconds)
     if not ok:
         return None
@@ -842,31 +826,52 @@ async def on_message(mensagem: discord.Message):
     if already_processed(mensagem.id, loop_time):
         return
 
-    # ---------------------------
-    # AUTO-MODERAÇÃO (sem mention)
-    # ---------------------------
-    try:
-        if mensagem.guild and mensagem.content:
-            txt = mensagem.content
-            if should_check_infraction(txt):
-                rep = await aplicar_auto_punicao(mensagem, mensagem.author, txt)
+    # -----------------------------------------------------
+    # AUTO-MOD: SEM palavras-chave (sempre avalia)
+    # - se for reply em alguém e mencionarem o bot: pune o autor da msg referenciada
+    # - se não: pune o próprio autor se o texto dele for infração
+    # -----------------------------------------------------
+    if mensagem.guild and mensagem.content and not esta_silenciado():
+        try:
+            # caso a pessoa mencione o bot respondendo outra msg, o alvo vira o autor referenciado
+            referenced = None
+            try:
+                if mensagem.reference:
+                    if isinstance(mensagem.reference.resolved, discord.Message):
+                        referenced = mensagem.reference.resolved
+                    elif mensagem.reference.message_id:
+                        referenced = await mensagem.channel.fetch_message(mensagem.reference.message_id)
+            except:
+                referenced = None
+
+            if (cliente.user in mensagem.mentions) and referenced and isinstance(referenced.author, discord.Member):
+                alvo = referenced.author
+                contexto = referenced.content or ""
+                if contexto:
+                    rep = await aplicar_punicao_se_preciso(mensagem, alvo, contexto)
+                    if rep:
+                        async with mensagem.channel.typing():
+                            await asyncio.sleep(0.7)
+                        await mensagem.channel.send(rep)
+            else:
+                # avalia o próprio texto do autor (sem depender de gatilho)
+                rep = await aplicar_punicao_se_preciso(mensagem, mensagem.author, mensagem.content)
                 if rep:
                     async with mensagem.channel.typing():
                         await asyncio.sleep(0.7)
                     await mensagem.channel.send(rep)
-    except:
-        pass
+        except:
+            pass
 
-    # ---------------------------
-    # Só responde se for mencionado
-    # ---------------------------
+    # -----------------------------------------------------
+    # CHAT: só responde se for mencionado
+    # -----------------------------------------------------
     if cliente.user not in mensagem.mentions:
         return
 
     if not await respeitar_delay_e_cooldown(mensagem.author.id):
         return
 
-    # trava geral anti-spam
     if ocupado.locked():
         return
 
@@ -882,20 +887,7 @@ async def on_message(mensagem: discord.Message):
         if not texto_limpo:
             return
 
-        # referência (quando mencionam o bot respondendo uma msg)
-        referenced = None
-        try:
-            if mensagem.reference:
-                if isinstance(mensagem.reference.resolved, discord.Message):
-                    referenced = mensagem.reference.resolved
-                elif mensagem.reference.message_id:
-                    referenced = await channel.fetch_message(mensagem.reference.message_id)
-        except:
-            referenced = None
-
-        # =====================================================
-        # SUPERIOR: tenta ordem se parecer ordem OU se tiver menção alvo
-        # =====================================================
+        # SUPERIOR: tenta interpretar como ordem, mas se não for ordem -> conversa normal
         if guild and autoridade_sobre_bot(mensagem.author, guild):
             mentions = []
             for m in mensagem.mentions:
@@ -904,55 +896,21 @@ async def on_message(mensagem: discord.Message):
                 if isinstance(m, discord.Member):
                     mentions.append({"user_id": m.id, "display_name": limpar_nome(m.display_name)})
 
-            tentar_ordem = bool(mentions) or parece_ordem_rapida(texto_limpo)
+            ordem = await interpretar_ordem(texto_limpo, mentions, {"author_id": mensagem.author.id, "founder_id": JAPEX_ID})
+            if ordem.get("action") != "none":
+                async with channel.typing():
+                    await asyncio.sleep(extra)
+                ok, resp = await executar_ordem(ordem, guild)
+                await channel.send(sanitizar_resposta(resp or "Entendido."))
+                return
 
-            if tentar_ordem:
-                ordem = await interpretar_ordem(texto_limpo, mentions, {"author_id": mensagem.author.id, "founder_id": JAPEX_ID})
-                if ordem.get("action") != "none":
-                    async with channel.typing():
-                        await asyncio.sleep(extra)
-                    ok, resp = await executar_ordem(ordem, guild)
-                    await channel.send(sanitizar_resposta(resp or ack_superior(mensagem.author)))
-                    return
-
-            # se é reply denunciando, tenta punir o autor da msg referenciada
-            if referenced and referenced.author and isinstance(referenced.author, discord.Member):
-                alvo = referenced.author
-                contexto = referenced.content or ""
-                if contexto and should_check_infraction(contexto):
-                    rep = await aplicar_auto_punicao(mensagem, alvo, contexto)
-                    if rep:
-                        async with channel.typing():
-                            await asyncio.sleep(extra)
-                        await channel.send(rep)
-                        return
-
-            # >>> mudança principal:
-            # superior agora conversa normal quando não é ordem
-            # (sem ficar preso em "Sim, ...")
             async with channel.typing():
                 await asyncio.sleep(extra)
             resposta = await gerar_resposta(texto_limpo, mensagem.author)
             await mensagem.reply(resposta)
             return
 
-        # =====================================================
-        # NÃO-SUPERIOR: se for reply com menção ao bot, pode punir autor da msg
-        # =====================================================
-        if referenced and referenced.author and isinstance(referenced.author, discord.Member):
-            alvo = referenced.author
-            contexto = referenced.content or ""
-            if contexto and should_check_infraction(contexto):
-                rep = await aplicar_auto_punicao(mensagem, alvo, contexto)
-                if rep:
-                    async with channel.typing():
-                        await asyncio.sleep(extra)
-                    await channel.send(rep)
-                    return
-
-        # =====================================================
-        # CONVERSA NORMAL
-        # =====================================================
+        # normal
         async with channel.typing():
             await asyncio.sleep(extra)
         resposta = await gerar_resposta(texto_limpo, mensagem.author)
