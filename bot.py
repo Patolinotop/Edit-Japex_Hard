@@ -4,11 +4,15 @@ import re
 from groq import Groq
 from dotenv import load_dotenv
 from datetime import timedelta
+from collections import deque
 
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN não definido")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -17,15 +21,12 @@ intents.members = True
 client = discord.Client(intents=intents)
 groq = Groq(api_key=GROQ_API_KEY)
 
-# xingamentos simples (ajuste se quiser)
-INSULTS = [
-    "burro", "idiota", "animal", "imundo", "lixo", "merda"
-]
+INSULTS = ["burro", "idiota", "animal", "imundo", "lixo", "merda"]
 
-# controle de reincidência
 offenses = {}
+user_history = {}
+bot_busy = False
 
-# regex para remover [Rct], [Cmdt] etc
 BRACKET_REGEX = re.compile(r"\[.*?\]")
 
 def highest_role(member: discord.Member):
@@ -43,8 +44,8 @@ def read_dados():
         return ""
 
 def is_insult(text: str):
-    text = text.lower()
-    return any(word in text for word in INSULTS)
+    t = text.lower()
+    return any(word in t for word in INSULTS)
 
 @client.event
 async def on_ready():
@@ -52,82 +53,87 @@ async def on_ready():
 
 @client.event
 async def on_message(message: discord.Message):
+    global bot_busy
+
     if message.author.bot:
         return
 
-    member = message.author
-    content = message.content
-    role_name = highest_role(member)
-    dados = read_dados()
+    if client.user not in message.mentions:
+        return
 
-    # DETECÇÃO DE XINGAMENTO
+    if bot_busy:
+        await message.reply("Já estou respondendo. Aguarde.")
+        return
+
+    bot_busy = True
+    member = message.author
+    role_name = highest_role(member)
+    content = message.content.replace(f"<@{client.user.id}>", "").strip()
+
+    # histórico (últimas 5)
+    history = user_history.setdefault(member.id, deque(maxlen=5))
+    history.append(content)
+
+    # xingamento
     if is_insult(content):
         count = offenses.get(member.id, 0) + 1
         offenses[member.id] = count
 
         if count == 1:
             await message.reply(f"Silêncio, {role_name}. Animal.")
-            await member.timeout(
-                timedelta(seconds=60),
-                reason="Calúnia ou xingamento leve"
-            )
-            return
-
+            await member.timeout(timedelta(seconds=60))
         elif count == 2:
             await message.reply(f"Já avisei, {role_name}. Imundo.")
-            await member.timeout(
-                timedelta(minutes=60),
-                reason="Insistência em xingamento"
-            )
-            return
-
+            await member.timeout(timedelta(hours=1))
         else:
-            await message.reply(f"Chega, {role_name}. Aprende a se comportar.")
-            await member.timeout(
-                timedelta(hours=3),
-                reason="Reincidência contínua"
-            )
-            return
+            await message.reply(f"Chega, {role_name}.")
+            await member.timeout(timedelta(hours=3))
 
-    # ===== RESPOSTA NORMAL (IA) =====
+        bot_busy = False
+        return
+
+    dados = read_dados()
+
     system_prompt = f"""
 Você é uma IA ajudante de servidor Discord.
-Mantenha respeito, boa gramática e conduta.
-Não seja moralista nem formal demais.
+Responda curto, direto e com boa gramática.
+Não seja formal nem moralista.
 Não invente informações.
+Use SOMENTE os dados abaixo como verdade:
 
-SEMPRE utilize APENAS as informações abaixo como base de verdade:
 {dados}
 
-Se não encontrar a resposta nos dados, diga que não consta nos registros.
-
-Caso o usuário desrespeite, responda curto e ríspido.
-Não peça desculpas.
-Não dê sermão.
+Se não constar nos dados, diga que não há registro.
 """
 
     user_prompt = f"""
-O usuário possui o cargo mais alto: {role_name}
+Cargo do usuário: {role_name}
 
-Pergunta:
+Histórico recente:
+{chr(10).join(history)}
+
+Pergunta atual:
 {content}
 """
 
     try:
-        completion = groq.chat.completions.create(
-            model="mixtral-8x7b-32768",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.4,
-            max_tokens=500
-        )
+        async with message.channel.typing():
+            completion = groq.chat.completions.create(
+                model="mixtral-8x7b-32768",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=50,
+                temperature=0.3
+            )
 
         reply = completion.choices[0].message.content
         await message.reply(reply[:2000])
 
-    except Exception as e:
-        await message.reply("Erro interno ao processar a resposta.")
+    except Exception:
+        await message.reply("Erro ao responder.")
+
+    bot_busy = False
 
 client.run(DISCORD_TOKEN)
