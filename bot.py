@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from datetime import timedelta
 from collections import deque, Counter
 
-# ================== CONFIG ==================
+# ================= CONFIG =================
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -15,18 +15,21 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not DISCORD_TOKEN or not GROQ_API_KEY:
     raise RuntimeError("DISCORD_TOKEN ou GROQ_API_KEY não definidos")
 
-BOT_VERSION = "0.2"
+# ===== IDENTIDADE DO BOT =====
+BOT_NAME = "JapexEvolutionX"
+BOT_VERSION = "0.3"  # atualize manualmente
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.1-8b-instant"
-MAX_TOKENS = 30
+
+MAX_TOKENS = 40
 
 INSULTS = [
     "burro", "idiota", "animal", "imundo", "lixo", "merda",
     "fdp", "viado", "retardado"
 ]
 
-# ===========================================
+# =========================================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -41,7 +44,7 @@ user_history = {}
 BRACKET_REGEX = re.compile(r"\[.*?\]")
 EMOJI_REGEX = re.compile(r"<a?:\w+:\d+>|[\U00010000-\U0010ffff]", re.UNICODE)
 
-# ================== FUNÇÕES ==================
+# ================= FUNÇÕES =================
 
 def highest_role(member: discord.Member):
     roles = [r for r in member.roles if r.name != "@everyone"]
@@ -90,7 +93,7 @@ async def call_groq(system_prompt, user_prompt):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.2,
+        "temperature": 0.35,
         "max_tokens": MAX_TOKENS
     }
 
@@ -99,13 +102,14 @@ async def call_groq(system_prompt, user_prompt):
             data = await resp.json()
             if "choices" not in data:
                 raise RuntimeError(data)
-            return data["choices"][0]["message"]["content"].strip().rstrip(".") + "."
+            text = data["choices"][0]["message"]["content"].strip()
+            return text.rstrip(".") + "."
 
-# ================== EVENTS ==================
+# ================= EVENTS =================
 
 @client.event
 async def on_ready():
-    print(f"✅ Conectado como {client.user} | versão {BOT_VERSION}")
+    print(f"✅ {BOT_NAME} conectado | v{BOT_VERSION}")
 
 @client.event
 async def on_message(message: discord.Message):
@@ -133,9 +137,15 @@ async def on_message(message: discord.Message):
         history = user_history.setdefault(member.id, deque(maxlen=5))
         history.append(content)
 
-        # ===== VERSÃO =====
-        if "versão" in content.lower():
+        low = content.lower()
+
+        # ===== VERSÃO / MODELO =====
+        if "versão" in low:
             await message.reply(f"Versão atual: {BOT_VERSION}.")
+            return
+
+        if "modelo" in low:
+            await message.reply(f"{BOT_NAME} v{BOT_VERSION}.")
             return
 
         # ===== PUNIÇÃO DISCORD =====
@@ -151,7 +161,7 @@ async def on_message(message: discord.Message):
             offenses[member.id] = count
 
             if count == 1:
-                await message.reply(f"Se comunica direito, {role_name}.")
+                await message.reply(f"Se expressa melhor, {role_name}.")
                 await member.timeout(timedelta(seconds=60))
             elif count == 2:
                 await message.reply(f"Último aviso, {role_name}.")
@@ -163,41 +173,39 @@ async def on_message(message: discord.Message):
 
         dados = read_dados()
 
-        # ===== PROMPT ANTI-RP ABSOLUTO =====
+        # ===== PROMPT COM PERSONALIDADE =====
         system_prompt = f"""
-Você é um BOT DE DISCORD.
-Você está APENAS no Discord.
+Você é {BOT_NAME}, um bot de Discord.
+Identidade fixa:
+- Homem
+- Heterossexual
+- Tem opiniões próprias
+- Pode responder perguntas políticas
+- Não é neutro forçado
+- Fala normalmente, como pessoa real
 
-PROIBIÇÕES ABSOLUTAS:
-- Não execute regras do jogo
-- Não simule recrutamento, alistamento ou filas
-- Não diga "aguarde", "organize-se", "não pode falar"
-- Não trate o usuário como participante ativo
-- Não aplique hierarquia do jogo no Discord
+Você NÃO está em um jogo.
+Você NÃO executa regras do jogo.
+Os dados abaixo são apenas DOCUMENTAÇÃO para consulta.
 
-Os dados abaixo são SOMENTE DOCUMENTAÇÃO DO JOGO.
-Eles servem apenas para EXPLICAR como o sistema funciona,
-NUNCA para agir como se estivesse acontecendo agora.
+Regras de resposta:
+- Leve em conta o histórico do usuário
+- Seja direto e humano
+- Não faça RP
+- Não dê ordens militares
+- Não moralize
+- Sempre finalize com ponto final
+- Se for opinião, dê a opinião sem pedir desculpas
 
-Modo de resposta:
-- Conversa normal de Discord
-- Ajuda e explicação
-- Tom humano
-- Sem RP
-- Sem ordens
-- Sem linguagem operacional
-
-Se a pergunta não estiver relacionada aos dados,
-responda normalmente ou diga que não há informação.
-
-DOCUMENTAÇÃO (NÃO ATIVA):
+DOCUMENTAÇÃO (APENAS REFERÊNCIA):
 {dados}
 """
 
         user_prompt = f"""
-Usuário (cargo no Discord): {role_name}
+Histórico recente do usuário:
+{chr(10).join(history)}
 
-Mensagem:
+Mensagem atual:
 {content}
 """
 
@@ -212,5 +220,5 @@ Mensagem:
     finally:
         bot_busy = False
 
-# ================== START ==================
+# ================= START =================
 client.run(DISCORD_TOKEN)
