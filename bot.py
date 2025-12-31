@@ -12,31 +12,23 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct")
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+    "meta-llama/llama-3.1-8b-instruct"
+)
 
 if not DISCORD_TOKEN or not OPENROUTER_API_KEY:
-    raise RuntimeError("DISCORD_TOKEN ou OPENROUTER_API_KEY não definidos")
+    raise RuntimeError("Variáveis de ambiente não definidas.")
 
 BOT_NAME = "JapexEvolutionX"
-BOT_VERSION = "0.4"
+BOT_VERSION = "1.0"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-MAX_TOKENS = 200
+CHAT_GERAL_ID = 1450594073596395548
+
+MAX_TOKENS = 220
 TEMPERATURE = 0.4
-
-# Apenas para “tom firme” sem virar baixaria/assédio
-FIRM_PHRASES = [
-    "Vamos manter o respeito.",
-    "Sem ataques pessoais.",
-    "Fala direito e eu respondo.",
-    "Último aviso: sem desrespeito."
-]
-
-BRACKET_REGEX = re.compile(r"\[.*?\]")
-
-# Histórico por usuário
-user_history = {}  # {user_id: deque([...])}
 
 # ================= DISCORD =================
 intents = discord.Intents.default()
@@ -45,7 +37,13 @@ intents.members = True
 
 client = discord.Client(intents=intents)
 
-# ================= FUNÇÕES =================
+# ================= ESTADO =================
+user_history = {}        # user_id -> deque
+grammar_warnings = {}    # user_id -> count
+
+# ================= UTIL =================
+BRACKET_REGEX = re.compile(r"\[.*?\]")
+
 def highest_role(member: discord.Member):
     roles = [r for r in member.roles if r.name != "@everyone"]
     if not roles:
@@ -60,26 +58,35 @@ def read_dados():
     except:
         return ""
 
-def safe_json_extract(text: str):
-    """
-    Tenta extrair um JSON de dentro do texto (caso o modelo 'vaze' algo).
-    """
+def absence_grammar(text: str):
+    t = text.strip()
+
+    if len(t) < 3:
+        return True
+    if t.isupper() and len(t) > 4:
+        return True
+    if not any(c.isalpha() for c in t):
+        return True
+    if t in ["?", "??", "???"]:
+        return True
+
+    return False
+
+def safe_json(text: str):
     text = text.strip()
-    # Caso já seja JSON puro:
     if text.startswith("{") and text.endswith("}"):
         return text
-    # Tenta achar o primeiro bloco {...}
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start:end+1]
+    s = text.find("{")
+    e = text.rfind("}")
+    if s != -1 and e != -1 and e > s:
+        return text[s:e+1]
     return None
 
-async def call_openrouter(system_prompt: str, user_prompt: str):
+# ================= OPENROUTER =================
+async def call_openrouter(system_prompt, user_prompt):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        # Opcional, mas recomendado pelo OpenRouter:
         "HTTP-Referer": "https://railway.app",
         "X-Title": BOT_NAME
     }
@@ -92,37 +99,38 @@ async def call_openrouter(system_prompt: str, user_prompt: str):
         ],
         "temperature": TEMPERATURE,
         "max_tokens": MAX_TOKENS,
-        # Ajuda a forçar formato:
-        "response_format": {"type": "json_object"},
+        "response_format": {"type": "json_object"}
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(OPENROUTER_URL, json=payload, headers=headers, timeout=45) as resp:
+        async with session.post(
+            OPENROUTER_URL,
+            headers=headers,
+            json=payload,
+            timeout=45
+        ) as resp:
             data = await resp.json()
             if "choices" not in data:
                 raise RuntimeError(data)
-            return data["choices"][0]["message"]["content"].strip()
+            return data["choices"][0]["message"]["content"]
 
-async def apply_timeout(member: discord.Member, seconds: int):
-    """
-    Aplica timeout. Requer permissões do bot e intents corretos.
-    """
-    seconds = max(0, min(int(seconds), 60 * 60 * 24))  # até 24h
-    if seconds <= 0:
-        return
-    await member.timeout(timedelta(seconds=seconds))
-
-# ================= PROMPT (IA decide ação) =================
-def build_system_prompt(dados: str):
+# ================= PROMPT =================
+def build_system_prompt(dados):
     return f"""
-Você é {BOT_NAME}, um moderador conversacional em um servidor do Discord.
+Você é {BOT_NAME}, moderador automático de um servidor Discord.
 
-Objetivo:
-- Responder como uma pessoa real (tom humano).
-- Se a mensagem for ofensiva/abusiva/spam/calúnia/assédio: aplicar moderação com timeout proporcional.
-- NÃO use xingamentos, humilhação, slurs ou ataques pessoais. Seja firme e direto.
+FUNÇÃO:
+- Conversar normalmente quando não houver infração.
+- Aplicar moderação somente em casos claros de abuso.
 
-Você deve retornar APENAS um JSON válido com estes campos:
+IMPORTANTE:
+- Gramática JÁ É TRATADA FORA DA IA.
+- NÃO considere gramática ou mensagens curtas como infração.
+- NÃO discuta regras com usuários.
+- NÃO faça textão.
+- Seja seco, direto e humano.
+
+FORMATO OBRIGATÓRIO (JSON):
 {{
   "action": "reply" | "timeout" | "ignore",
   "timeout_seconds": number,
@@ -130,28 +138,24 @@ Você deve retornar APENAS um JSON válido com estes campos:
   "reason": string
 }}
 
-Regras de moderação (guia, você pode ajustar):
-- "ausência gramatical" (mensagem vazia, só caps, só emoji, só '???', etc.): timeout 60s
-- "spam" (repetição, flood, menção insistente): timeout 120–600s
-- "insulto leve" (ofensa genérica a pessoa): timeout 300–900s
-- "assédio / calúnia" (acusação grave sem prova, perseguição): timeout 900–3600s
-- "ódio a grupo protegido" / slurs: timeout 3600s (e reply curto)
+CRITÉRIOS:
+- Spam real / flood
+- Insulto direto
+- Assédio ou calúnia
+- Ódio a grupo protegido
 
-Resposta:
-- Se action="timeout", reply deve ser curto e firme (sem humilhar).
-- Se action="reply", responda a pergunta normalmente.
-- Se action="ignore", reply pode ser "".
+Na dúvida, responda normalmente.
 
-Contexto extra (documentação, só referência):
+DOCUMENTAÇÃO (referência):
 {dados}
 """.strip()
 
-def build_user_prompt(role_name: str, history: deque, content: str):
+def build_user_prompt(role_name, history, content):
     hist = "\n".join(history) if history else ""
     return f"""
-Cargo/nome do autor (para tom de resposta, sem bajular): {role_name}
+Autor: {role_name}
 
-Histórico recente do autor:
+Histórico recente:
 {hist}
 
 Mensagem atual:
@@ -161,92 +165,119 @@ Mensagem atual:
 # ================= EVENTS =================
 @client.event
 async def on_ready():
-    print(f"✅ {BOT_NAME} conectado | v{BOT_VERSION} | model={OPENROUTER_MODEL}")
+    print(f"✅ {BOT_NAME} online | v{BOT_VERSION}")
+    print(f"Modelo: {OPENROUTER_MODEL}")
 
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Só reage quando mencionam o bot
     if client.user not in message.mentions:
         return
 
-    content = message.content.replace(f"<@{client.user.id}>", "").strip()
+    member = message.author
+    content = message.content.replace(
+        f"<@{client.user.id}>", ""
+    ).strip()
+
     if not content:
         return
 
-    member = message.author
-    role_name = highest_role(member)
+    # ===== GRAMÁTICA (FORA DO CHAT GERAL) =====
+    if message.channel.id != CHAT_GERAL_ID:
+        if absence_grammar(content):
+            count = grammar_warnings.get(member.id, 0) + 1
+            grammar_warnings[member.id] = count
 
-    history = user_history.setdefault(member.id, deque(maxlen=8))
+            if count == 1:
+                await message.reply("?")
+                return
+
+            elif count == 2:
+                await message.reply("Por favor, utilize gramática.")
+                return
+
+            else:
+                await message.reply("Silêncio, animal.")
+                try:
+                    await member.timeout(timedelta(minutes=1))
+                except:
+                    pass
+                return
+
+    # reset se escreveu direito
+    grammar_warnings.pop(member.id, None)
+
+    # ===== HISTÓRICO =====
+    history = user_history.setdefault(
+        member.id, deque(maxlen=8)
+    )
     history.append(content)
 
-    # Comandos básicos locais (não precisa IA)
+    # ===== COMANDOS SIMPLES =====
     low = content.lower()
     if "versão" in low:
-        await message.reply(f"Versão atual: {BOT_VERSION}.")
+        await message.reply(f"Versão {BOT_VERSION}.")
         return
     if "modelo" in low:
-        await message.reply(f"Modelo atual: {OPENROUTER_MODEL}.")
+        await message.reply(f"{OPENROUTER_MODEL}.")
         return
 
+    # ===== IA =====
     dados = read_dados()
     system_prompt = build_system_prompt(dados)
-    user_prompt = build_user_prompt(role_name, history, content)
+    user_prompt = build_user_prompt(
+        highest_role(member),
+        history,
+        content
+    )
 
     try:
         async with message.channel.typing():
-            raw = await call_openrouter(system_prompt, user_prompt)
+            raw = await call_openrouter(
+                system_prompt,
+                user_prompt
+            )
 
-        json_text = safe_json_extract(raw)
+        json_text = safe_json(raw)
         if not json_text:
-            # fallback seguro
-            await message.reply("Não entendi direito. Reformula sem flood/spam.")
+            await message.reply("Seja mais claro.")
             return
 
         decision = json.loads(json_text)
 
         action = decision.get("action", "reply")
-        timeout_seconds = int(decision.get("timeout_seconds", 0) or 0)
+        timeout_seconds = int(decision.get("timeout_seconds", 0))
         reply = (decision.get("reply") or "").strip()
 
-        # Segurança: evita timeouts absurdos por bug de modelo
-        timeout_seconds = max(0, min(timeout_seconds, 60 * 60 * 24))
+        timeout_seconds = max(
+            0, min(timeout_seconds, 3600)
+        )
 
         if action == "timeout":
-            # aplica timeout
             try:
-                await apply_timeout(member, timeout_seconds)
-            except Exception as e:
-                # sem permissão? avisa no reply
-                if not reply:
-                    reply = "Vou moderar isso, mas não tenho permissão pra aplicar timeout aqui."
-                else:
-                    reply += " (Sem permissão pra timeout.)"
+                await member.timeout(
+                    timedelta(seconds=timeout_seconds)
+                )
+            except:
+                reply += " (Sem permissão pra timeout.)"
 
             if not reply:
-                reply = "Mensagem fora das regras. Mantém o respeito."
+                reply = "Comportamento inadequado."
             await message.reply(reply)
-
-        elif action == "ignore":
-            # opcionalmente não responder
-            if reply:
-                await message.reply(reply)
             return
 
-        else:
-            # reply normal
-            if not reply:
-                reply = "Ok."
-            # garante ponto final (se você quiser esse estilo)
-            if reply[-1] not in ".!?":
-                reply += "."
-            await message.reply(reply)
+        if action == "ignore":
+            return
+
+        if not reply:
+            reply = "?"
+        await message.reply(reply)
 
     except Exception as e:
-        print("❌ ERRO:", repr(e))
-        await message.reply("Deu erro aqui. Tenta de novo em alguns segundos.")
+        print("ERRO:", repr(e))
+        await message.reply("Erro interno.")
 
 # ================= START =================
 client.run(DISCORD_TOKEN)
