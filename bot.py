@@ -22,7 +22,7 @@ openai = OpenAI(api_key=CHAVE_OPENAI)
 
 # ================== MODELS ==================
 MODEL_CHAT = "gpt-5.2"
-MODEL_CTRL = "gpt-4o"
+MODEL_CTRL = "gpt-5-nano"
 
 MODEL_PUBLIC_NAME = "JapexUltimation1.5"  # <= atualizado
 
