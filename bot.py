@@ -21,10 +21,10 @@ if not TOKEN_DISCORD or not CHAVE_OPENAI:
 openai = OpenAI(api_key=CHAVE_OPENAI)
 
 # ================== MODELS ==================
-MODEL_CHAT = "gpt-5.2"
-MODEL_CTRL = "gpt-4o"
+MODEL_CHAT = "gpt-5-nano"
+MODEL_CTRL = "gpt-5-nano"
 
-MODEL_PUBLIC_NAME = "JapexUltimation1.5"  # <= atualizado
+MODEL_PUBLIC_NAME = "JapexUltimation1.6"
 
 # ================== PATHS ==================
 PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
@@ -33,9 +33,13 @@ CAMINHO_ORDENS = os.path.join(PASTA_ATUAL, "ordens.txt")
 CAMINHO_IGNORE = os.path.join(PASTA_ATUAL, "ignorar.txt")
 CAMINHO_SILENCIO = os.path.join(PASTA_ATUAL, "silencio.flag")
 
-# ================== IDs FIXOS (conforme você passou) ==================
+# ================== IDs FIXOS ==================
 JAPEX_ID = 1331505963622076476
-BADD_ID = 1319506938391957575  # Baddx_xd (autoridade invisível, não citar sem perguntarem)
+LALOMAIO_ID = 1251950121068007496
+SANTIAGO_ID = 1401691898816762018
+PURTUGA_ID = 1429995893305643082
+RIQUEJOO_ID = None
+BADD_ID = 1319506938391957575  # autoridade invisível
 
 JAPEX_MENTION = f"<@{JAPEX_ID}>"
 
@@ -46,19 +50,18 @@ CHEFOES_PUBLICOS = [
     ("purtuga", "Supremo Tribunal Militar", 3),
     ("riquejoo", "Moderador", 4),
 ]
-
 CHEFOES_IDS = {
-    "lalomaio": 1251950121068007496,
-    "santiago": 1401691898816762018,
-    "purtuga": 1429995893305643082,
-    "riquejoo": None,  # você disse NONE
+    "lalomaio": LALOMAIO_ID,
+    "santiago": SANTIAGO_ID,
+    "purtuga": PURTUGA_ID,
+    "riquejoo": RIQUEJOO_ID,
 }
 
 # ================== SUPORTE ==================
 SUPPORT_CHANNEL_ID = 1450602972773089493
 SUPPORT_CHANNEL_MENTION = f"<#{SUPPORT_CHANNEL_ID}>"
 
-# ================== PATENTES EB (ordem menor = mais alto) ==================
+# ================== PATENTES EB ==================
 PATENTES = [
     ("[S-Cmdt]", "Sub Comandante", 2),
     ("[MR]", "Marechal", 3),
@@ -123,17 +126,6 @@ def is_badd(uid: int) -> bool:
 def esta_silenciado() -> bool:
     return os.path.exists(CAMINHO_SILENCIO)
 
-def set_silencio(on: bool) -> None:
-    try:
-        if on:
-            with open(CAMINHO_SILENCIO, "w", encoding="utf-8") as f:
-                f.write("1")
-        else:
-            if os.path.exists(CAMINHO_SILENCIO):
-                os.remove(CAMINHO_SILENCIO)
-    except:
-        pass
-
 def _cleanup_processed(loop_time: float) -> None:
     to_del = [mid for mid, ts in _PROCESSED.items() if (loop_time - ts) > PROCESSED_TTL]
     for mid in to_del:
@@ -176,20 +168,6 @@ def parece_pergunta(texto: str) -> bool:
     )
     return any(low.startswith(s) for s in starters)
 
-def needs_support_hint(texto: str) -> bool:
-    t = norm(texto)
-    keys = [
-        "erro", "bug", "nao funciona", "não funciona", "falhando", "ajuda",
-        "suporte", "ticket", "problema", "denuncia", "denúncia", "report",
-        "ban injusto", "mute injusto", "apelacao", "apelação"
-    ]
-    return any(k in t for k in keys)
-
-def is_serious_issue(texto: str) -> bool:
-    t = norm(texto)
-    keys = ["raid", "invadiram", "hack", "vazou", "vazamento", "dox", "extorsão", "extorsao"]
-    return any(k in t for k in keys)
-
 _BAD_END = {
     "em","no","na","nos","nas","de","do","da","dos","das","pra","pro","para","por",
     "com","sem","e","ou","que","a","o","as","os","um","uma"
@@ -197,26 +175,20 @@ _BAD_END = {
 
 def sanitizar_resposta(msg: str) -> str:
     msg = normalizar_espacos(msg).replace("\n", " ")
-    msg = re.sub(r"\balguma ordem\b\.?", "", msg, flags=re.IGNORECASE).strip()
     msg = normalizar_espacos(msg)
     if not msg:
         return "Entendido."
-
-    # garante final “fechado”
     parts = msg.split()
     if parts:
         last = parts[-1].strip(".,;:!?)\"]}").lower()
         if last in _BAD_END:
-            # caso clássico: "descanso em" -> vira "descanso em paz."
             if last == "em":
                 msg = " ".join(parts[:-1]).rstrip()
                 msg = (msg + " em paz").strip()
             else:
                 msg = " ".join(parts[:-1]).rstrip()
-
     if not re.search(r"[.!?…]$", msg):
         msg = msg.rstrip(" ,;:") + "."
-
     if len(msg) > 280:
         msg = msg[:280].rstrip() + "..."
     return msg
@@ -236,66 +208,18 @@ def carregar_ignorados() -> Set[int]:
         pass
     return s
 
-def salvar_ignorados(s: Set[int]) -> None:
-    try:
-        with open(CAMINHO_IGNORE, "w", encoding="utf-8") as f:
-            for uid in sorted(s):
-                f.write(str(uid) + "\n")
-    except:
-        pass
-
 IGNORADOS: Set[int] = carregar_ignorados()
 
-# ================== ORDENS PERSISTENTES ==================
-def carregar_ordens() -> str:
-    try:
-        if not os.path.exists(CAMINHO_ORDENS):
-            return ""
-        with open(CAMINHO_ORDENS, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except:
-        return ""
-
-def salvar_ordens(texto: str) -> None:
-    try:
-        with open(CAMINHO_ORDENS, "w", encoding="utf-8") as f:
-            f.write(texto.strip())
-    except:
-        pass
-
-def limitar_ordens(texto: str, max_chars: int = 360) -> str:
-    texto = normalizar_espacos(texto)
-    if len(texto) <= max_chars:
-        return texto
-    return texto[-max_chars:].strip()
-
-def adicionar_ordem(nova: str) -> None:
-    nova = normalizar_espacos(nova)
-    if not nova:
-        return
-    atual = carregar_ordens()
-    combinado = (atual + "\n" + f"- {nova}").strip() if atual else f"- {nova}"
-    salvar_ordens(limitar_ordens(combinado, max_chars=360))
-
-def limpar_ordens() -> None:
-    try:
-        if os.path.exists(CAMINHO_ORDENS):
-            os.remove(CAMINHO_ORDENS)
-    except:
-        pass
-
-# ================== CHEFÕES (públicos) ==================
+# ================== CHEFÕES ==================
 def chefe_publico_info(member: discord.Member) -> Optional[Tuple[str, str, int]]:
     if is_japex(member.id):
         return ("japex", "Fundador", 0)
-
     for key, titulo, rank in CHEFOES_PUBLICOS:
         if key == "japex":
             continue
         cid = CHEFOES_IDS.get(key)
         if cid and member.id == cid:
             return (key, titulo, rank)
-
     return None
 
 # ================== PATENTES ==================
@@ -370,19 +294,15 @@ def ack_superior(member: discord.Member) -> str:
     return f"Sim, {vocativo(member)}."
 
 def autoridade_sobre_bot(author: discord.Member, guild: discord.Guild) -> bool:
-    if is_japex(author.id):
-        return True
-    if is_badd(author.id):
+    if is_japex(author.id) or is_badd(author.id):
         return True
     if chefe_publico_info(author) is not None:
         return True
-
     if not guild or not cliente.user:
         return False
     bm = guild.get_member(cliente.user.id)
     if not bm:
         return False
-
     a = rank_patente(author)
     b = rank_patente(bm)
     if a is None or b is None:
@@ -420,98 +340,6 @@ def bot_can_manage_role(guild: discord.Guild, role: discord.Role) -> bool:
     except:
         return False
 
-# ================== DADOS.TXT (busca curta) ==================
-STOPWORDS = {
-    "a","o","os","as","de","do","da","dos","das","e","em","no","na","nos","nas",
-    "um","uma","uns","umas","para","por","com","sem","que","é","ser","se","ao",
-    "à","às","ou","como","mais","menos","muito","pouco","já","não","sim","nao",
-    "sobre","isso","isto","aquele","aquela","aquilo","meu","minha","seu","sua",
-    "pra","pro","pq","porque"
-}
-_dados_cache = {"mtime": None, "blocos": []}
-
-def _tokenizar(s: str) -> Set[str]:
-    s = (s or "").lower()
-    s = re.sub(r"[^a-z0-9áàâãéèêíìîóòôõúùûç°\s]", " ", s, flags=re.IGNORECASE)
-    parts = [p for p in s.split() if p and p not in STOPWORDS and len(p) > 2]
-    return set(parts)
-
-def carregar_blocos_dados() -> List[Tuple[str, str, Set[str]]]:
-    try:
-        if not os.path.exists(CAMINHO_DADOS):
-            return []
-        mtime = os.path.getmtime(CAMINHO_DADOS)
-        if _dados_cache["mtime"] == mtime and _dados_cache["blocos"]:
-            return _dados_cache["blocos"]
-
-        with open(CAMINHO_DADOS, "r", encoding="utf-8") as f:
-            raw = f.read().replace("\r\n", "\n").strip()
-        if not raw:
-            return []
-
-        partes = re.split(r"(?m)^\s*##\s+", raw)
-        blocos: List[Tuple[str, str, Set[str]]] = []
-
-        if partes and not raw.lstrip().startswith("##"):
-            titulo = "GERAL"
-            texto = partes[0].strip()
-            toks = _tokenizar(titulo + " " + texto)
-            blocos.append((titulo, texto, toks))
-            partes = partes[1:]
-
-        for p in partes:
-            p = p.strip()
-            if not p:
-                continue
-            linhas = p.split("\n", 1)
-            titulo = normalizar_espacos(linhas[0])[:60] if linhas else "BLOCO"
-            texto = linhas[1].strip() if len(linhas) > 1 else ""
-            texto = re.sub(r"\n{3,}", "\n\n", texto).strip()
-            toks = _tokenizar(titulo + " " + texto)
-            blocos.append((titulo, texto, toks))
-
-        _dados_cache["mtime"] = mtime
-        _dados_cache["blocos"] = blocos
-        return blocos
-    except:
-        return []
-
-def buscar_contexto_dados(pergunta: str, max_chars: int = 650) -> str:
-    blocos = carregar_blocos_dados()
-    if not blocos:
-        return ""
-    q_tokens = _tokenizar(pergunta)
-    if not q_tokens:
-        return ""
-    melhor_score = 0
-    melhor = None
-    for titulo, texto, toks in blocos:
-        inter = len(q_tokens.intersection(toks))
-        if inter > melhor_score:
-            melhor_score = inter
-            melhor = (titulo, texto)
-    if not melhor or melhor_score < 2:
-        return ""
-    titulo, texto = melhor
-    contexto = normalizar_espacos(f"[{titulo}] {texto}")
-    if len(contexto) > max_chars:
-        contexto = contexto[:max_chars].rstrip() + "..."
-    return contexto
-
-# ================== HISTÓRICO ==================
-def adicionar_historico(channel_id: int, author_id: int, role: str, content: str) -> None:
-    content = normalizar_espacos(content)
-    if not content:
-        return
-    HISTORICO.setdefault(channel_id, []).append({"author_id": author_id, "role": role, "content": content})
-    HISTORICO[channel_id] = HISTORICO[channel_id][-60:]
-
-def historico_filtrado(channel_id: int, user_id: int) -> List[dict]:
-    hist = HISTORICO.get(channel_id, [])
-    filtrado = [m for m in hist if (m["author_id"] == user_id or m["author_id"] == JAPEX_ID)]
-    ultimas = filtrado[-MAX_MSGS_CONTEXT:]
-    return [{"role": m["role"], "content": m["content"]} for m in ultimas]
-
 # ================== DISCORD ACTIONS ==================
 async def mutar(member: discord.Member, segundos: int) -> Tuple[bool, str]:
     try:
@@ -544,7 +372,7 @@ async def remove_role(member: discord.Member, role: discord.Role) -> Tuple[bool,
     except Exception as e:
         return False, repr(e)
 
-# ================== IA: ORDEM (JSON) ==================
+# ================== IA: INTERPRETA ORDEM (JSON) ==================
 def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict) -> dict:
     schema = {
         "action": "none",
@@ -554,11 +382,11 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict
     }
 
     prompt = (
-        "Interprete como ORDEM somente se for ordem. Se for conversa/pergunta, retorne action=none.\n"
+        "Interprete como ORDEM somente se for ordem. Se for conversa/pergunta, action=none.\n"
         "Ações:\n"
         "- mute/unmute/ban (target_user_ids + duration_seconds opcional)\n"
-        "- remove_all_roles (target_user_ids)  // para 'tirar todos os cargos'\n"
-        "Responda APENAS JSON.\n"
+        "- remove_all_roles (target_user_ids)  // 'tire todos os cargos'\n"
+        "Retorne JSON apenas.\n"
         f"META: {json.dumps(meta, ensure_ascii=False)[:900]}\n"
         f"MENSAGEM: {texto}\n"
         f"MENTIONS: {json.dumps(mentions, ensure_ascii=False)}\n"
@@ -617,7 +445,7 @@ async def interpretar_ordem_superior(texto: str, mentions: List[dict], meta: dic
     except:
         return {"action":"none","target_user_ids":[],"duration_seconds":None,"reason":""}
 
-# ================== EXEC ORDENS ==================
+# ================== EXEC ORDENS (NUNCA MENTE) ==================
 async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
     action = ordem.get("action", "none")
     tids: List[int] = ordem.get("target_user_ids", []) or []
@@ -628,9 +456,9 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
         return False, reason
 
     if not tids:
-        return False, "Faltou indicar o alvo."
+        return False, "Faltou marcar o alvo."
 
-    members = []
+    members: List[discord.Member] = []
     for uid in tids[:MAX_MASS_TARGETS]:
         m = guild.get_member(int(uid))
         if isinstance(m, discord.Member):
@@ -638,6 +466,7 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
     if not members:
         return False, "Não achei o alvo no servidor."
 
+    # -------- mute/unmute/ban --------
     if action in {"mute","unmute","ban"}:
         if action in {"mute","unmute"} and not bot_has_perm(guild, "moderate_members"):
             return False, "Eu não tenho permissão de moderar membros (timeout)."
@@ -650,18 +479,28 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
 
         if action == "unmute":
             okc = 0
+            last_err = ""
             for m in members:
-                ok, _ = await desmutar(m)
+                ok, err = await desmutar(m)
                 okc += 1 if ok else 0
+                last_err = err or last_err
+                await asyncio.sleep(0.15)
+            if okc == 0:
+                return False, f"Falhou ao desmutar ({last_err or 'sem detalhes'})."
             return True, f"Desmutados: {okc}."
 
         if action == "mute":
             seconds = int(dur) if isinstance(dur, int) else 60
             seconds = max(1, min(86400, seconds))
             okc = 0
+            last_err = ""
             for m in members:
-                ok, _ = await mutar(m, seconds)
+                ok, err = await mutar(m, seconds)
                 okc += 1 if ok else 0
+                last_err = err or last_err
+                await asyncio.sleep(0.15)
+            if okc == 0:
+                return False, f"Falhou ao mutar ({last_err or 'sem detalhes'})."
             mot = reason or "Conduta inadequada."
             if len(members) == 1:
                 return True, f"Mutado: {members[0].display_name} | {seconds}s | Motivo: {mot}."
@@ -669,17 +508,24 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
 
         if action == "ban":
             okc = 0
+            last_err = ""
             for m in members:
-                ok, _ = await banir(m)
+                ok, err = await banir(m)
                 okc += 1 if ok else 0
+                last_err = err or last_err
+                await asyncio.sleep(0.2)
+            if okc == 0:
+                return False, f"Falhou ao banir ({last_err or 'sem detalhes'})."
             mot = reason or "Infração grave."
             if len(members) == 1:
                 return True, f"Banido: {members[0].display_name} | permanente | Motivo: {mot}."
             return True, f"Banidos: {okc} | Motivo: {mot}."
 
+    # -------- remove_all_roles --------
     if action == "remove_all_roles":
         if not bot_has_perm(guild, "manage_roles"):
             return False, "Eu não tenho permissão de gerenciar cargos."
+
         alvo = members[0]  # 1 alvo por segurança
         if not bot_can_act_on(guild, alvo):
             return False, f"Não posso mexer em {alvo.display_name}: cargo acima/igual ao meu."
@@ -703,59 +549,30 @@ async def executar_ordem(ordem: dict, guild: discord.Guild) -> Tuple[bool, str]:
             return False, f"Não há cargos removíveis em {alvo.display_name} (gerenciados/acima do meu cargo)."
 
         removed = 0
+        last_err = ""
         for r in removable:
-            ok, _ = await remove_role(alvo, r)
+            ok, err = await remove_role(alvo, r)
             removed += 1 if ok else 0
+            last_err = err or last_err
             await asyncio.sleep(0.12)
 
+        if removed == 0:
+            return False, f"Falhou ao remover cargos ({last_err or 'sem detalhes'})."
         return True, f"Cargos removidos: {removed} | Alvo: {alvo.display_name}."
 
     return False, "Essa ordem não está ativa."
 
-# ================== IA: CHAT ==================
+# ================== IA: CHAT (menos moralista) ==================
 PERSONA_BASE = (
-    "Você é um personagem militar (do jogo) com conduta e formalidade, mas conversa normal.\n"
+    "Você é um personagem militar (do jogo) com postura e respeito, mas conversa normal.\n"
     "Responda curto e direto, UMA linha.\n"
     "NUNCA faça perguntas e NUNCA puxe assunto.\n"
     "Pode ter opiniões próprias.\n"
-    "Identidade do Japex/Fundador: SOMENTE por author_id==fundador_id.\n"
-    "Se perguntarem 'qual é seu modelo', responda exatamente: JapexUltimation1.5\n"
+    "Se perguntarem 'qual é seu modelo', responda exatamente: JapexUltimation1.6\n"
     "Se perguntarem quem criou/fez/programou: 'Foi o Baddx_xd.'\n"
     "Sempre finalize com pontuação.\n"
     "Nunca diga que é IA.\n"
 )
-
-def montar_system(author: discord.Member, contexto_dados: str) -> str:
-    roles = roles_curto(author, max_roles=8)
-    guess = best_patente_title(author) or author.display_name
-    ordens = carregar_ordens()
-
-    extra = (
-        f"author_id={author.id} fundador_id={JAPEX_ID}. "
-        f"display_name={author.display_name}. roles={roles}. best_guess={guess}. "
-        "Saída: UMA linha curta.\n"
-    )
-    if ordens:
-        extra += " ORDENS: " + ordens
-    if contexto_dados:
-        extra += " BASE: " + contexto_dados
-    return PERSONA_BASE + " " + extra
-
-def quer_texto(texto: str) -> bool:
-    t = (texto or "").lower()
-    return any(g in t for g in [
-        "faça um texto", "faz um texto", "texto gramatical",
-        "explique", "explica", "detalhe", "detalha",
-        "passo a passo", "redação", "redacao"
-    ])
-
-def pergunta_modelo(texto: str) -> bool:
-    t = norm(texto)
-    return ("qual" in t and "modelo" in t) or ("seu modelo" in t) or ("qual é o modelo" in t)
-
-def pergunta_criador(texto: str) -> bool:
-    t = norm(texto)
-    return ("quem" in t) and any(k in t for k in ["programou", "criou", "fez", "criador"])
 
 def chat_sync(mensagens: List[dict], max_tokens: int) -> str:
     r = openai.responses.create(
@@ -766,32 +583,29 @@ def chat_sync(mensagens: List[dict], max_tokens: int) -> str:
     )
     return (r.output_text or "").strip() or "Entendido."
 
-async def gerar_resposta(texto: str, author: discord.Member, channel_id: int) -> str:
+def pergunta_modelo(texto: str) -> bool:
+    t = norm(texto)
+    return ("qual" in t and "modelo" in t) or ("seu modelo" in t) or ("qual é o modelo" in t)
+
+def pergunta_criador(texto: str) -> bool:
+    t = norm(texto)
+    return ("quem" in t) and any(k in t for k in ["programou", "criou", "fez", "criador"])
+
+async def gerar_resposta(texto: str, author: discord.Member) -> str:
     if pergunta_modelo(texto):
         return MODEL_PUBLIC_NAME
     if pergunta_criador(texto):
         return "Foi o Baddx_xd."
 
-    # AUMENTO MÍNIMO só pra evitar truncar frase
-    usar_texto = quer_texto(texto)
-    max_tokens = 64 if usar_texto else 44  # <= antes era baixo demais e cortava
+    # pequeno, mas suficiente pra fechar 1 linha
+    max_tokens = 44
 
-    contexto = buscar_contexto_dados(texto, max_chars=650)
-    system = montar_system(author, contexto)
-
-    msgs: List[dict] = [{"role": "system", "content": system}]
-    msgs.extend(historico_filtrado(channel_id, author.id))
-    msgs.append({"role": "user", "content": texto})
-
+    msgs = [
+        {"role": "system", "content": PERSONA_BASE},
+        {"role": "user", "content": texto},
+    ]
     out = await asyncio.wait_for(asyncio.to_thread(chat_sync, msgs, max_tokens), timeout=12)
-    resp = sanitizar_resposta(out)
-
-    if needs_support_hint(texto) and SUPPORT_CHANNEL_MENTION not in resp:
-        resp = sanitizar_resposta(f"{resp} Suporte: {SUPPORT_CHANNEL_MENTION}")
-    if is_serious_issue(texto) and (JAPEX_MENTION not in resp):
-        resp = sanitizar_resposta(f"{resp} {JAPEX_MENTION}")
-
-    return resp
+    return sanitizar_resposta(out)
 
 # ================== HELPERS ==================
 def remover_mencao_bot(texto: str) -> str:
@@ -830,9 +644,6 @@ async def on_message(mensagem: discord.Message):
         channel = mensagem.channel
         extra = typing_extra(mensagem.author.id)
 
-        if esta_silenciado() and (not guild or not autoridade_sobre_bot(mensagem.author, guild)):
-            return
-
         if (mensagem.author.id in IGNORADOS) and (not is_japex(mensagem.author.id)):
             return
 
@@ -840,7 +651,7 @@ async def on_message(mensagem: discord.Message):
         if not texto_limpo:
             return
 
-        # ========= MODO ORDEM (somente se action != none) =========
+        # ========= SUPERIOR: tenta ordem; se não for ordem e não for pergunta -> só ACK =========
         if guild and autoridade_sobre_bot(mensagem.author, guild):
             mentions = []
             for m in mensagem.mentions:
@@ -849,8 +660,7 @@ async def on_message(mensagem: discord.Message):
                 if isinstance(m, discord.Member):
                     mentions.append({"user_id": m.id, "display_name": m.display_name})
 
-            meta = {"author_id": mensagem.author.id, "founder_id": JAPEX_ID}
-            ordem = await interpretar_ordem_superior(texto_limpo, mentions, meta)
+            ordem = await interpretar_ordem_superior(texto_limpo, mentions, {"author_id": mensagem.author.id})
 
             if ordem.get("action") != "none":
                 async with channel.typing():
@@ -859,13 +669,16 @@ async def on_message(mensagem: discord.Message):
                 await channel.send(sanitizar_resposta(resp if resp else ack_superior(mensagem.author)))
                 return
 
+            # não é ordem: se não for pergunta, não vira moralista — só obedece/ack
+            if not parece_pergunta(texto_limpo):
+                await channel.send(ack_superior(mensagem.author))
+                return
+            # se for pergunta, cai pra chat normal
+
         # ========= CONVERSA NORMAL =========
         async with channel.typing():
             await asyncio.sleep(extra)
-            resposta = await gerar_resposta(texto_limpo, mensagem.author, channel.id)
-
-        adicionar_historico(channel.id, mensagem.author.id, "user", texto_limpo)
-        adicionar_historico(channel.id, mensagem.author.id, "assistant", resposta)
+            resposta = await gerar_resposta(texto_limpo, mensagem.author)
 
         await mensagem.reply(resposta)
 
