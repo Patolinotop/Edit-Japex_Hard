@@ -15,14 +15,14 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not DISCORD_TOKEN or not GROQ_API_KEY:
     raise RuntimeError("DISCORD_TOKEN ou GROQ_API_KEY não definidos")
 
-# ===== IDENTIDADE DO BOT =====
+# IDENTIDADE
 BOT_NAME = "JapexEvolutionX"
-BOT_VERSION = "0.3"  # atualize manualmente
+BOT_VERSION = "0.3"
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.1-8b-instant"
 
-MAX_TOKENS = 40
+MAX_TOKENS = 60  # LIMITE DURO
 
 INSULTS = [
     "burro", "idiota", "animal", "imundo", "lixo", "merda",
@@ -93,7 +93,7 @@ async def call_groq(system_prompt, user_prompt):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.35,
+        "temperature": 0.25,
         "max_tokens": MAX_TOKENS
     }
 
@@ -139,7 +139,7 @@ async def on_message(message: discord.Message):
 
         low = content.lower()
 
-        # ===== VERSÃO / MODELO =====
+        # ===== MODELO / VERSÃO =====
         if "versão" in low:
             await message.reply(f"Versão atual: {BOT_VERSION}.")
             return
@@ -173,31 +173,27 @@ async def on_message(message: discord.Message):
 
         dados = read_dados()
 
-        # ===== PROMPT COM PERSONALIDADE =====
+        # ===== PROMPT DE CONTROLE DE TEXTO =====
         system_prompt = f"""
 Você é {BOT_NAME}, um bot de Discord.
-Identidade fixa:
-- Homem
-- Heterossexual
-- Tem opiniões próprias
-- Pode responder perguntas políticas
-- Não é neutro forçado
-- Fala normalmente, como pessoa real
+Fale como uma pessoa normal.
 
-Você NÃO está em um jogo.
-Você NÃO executa regras do jogo.
-Os dados abaixo são apenas DOCUMENTAÇÃO para consulta.
+REGRAS DE TEXTO (OBRIGATÓRIAS):
+- Não cumprimente.
+- Não explique o que vai fazer.
+- Não diga que é um bot.
+- Vá direto ao conteúdo.
+- Perguntas simples: 1 frase curta.
+- Perguntas médias: no máximo 2 frases.
+- Só use 3 frases se for realmente necessário.
+- Nunca faça introdução vazia.
+- Sempre termine com ponto final.
 
-Regras de resposta:
-- Leve em conta o histórico do usuário
-- Seja direto e humano
-- Não faça RP
-- Não dê ordens militares
-- Não moralize
-- Sempre finalize com ponto final
-- Se for opinião, dê a opinião sem pedir desculpas
+Os dados abaixo são DOCUMENTAÇÃO DO JOGO,
+usados apenas para EXPLICAR quando perguntado.
+Nunca aja como se o jogo estivesse acontecendo.
 
-DOCUMENTAÇÃO (APENAS REFERÊNCIA):
+DOCUMENTAÇÃO:
 {dados}
 """
 
