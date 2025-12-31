@@ -16,37 +16,32 @@ OPENROUTER_MODEL = os.getenv(
     "meta-llama/llama-3.1-70b-instruct"
 ).strip()
 
-if not DISCORD_TOKEN or not OPENROUTER_API_KEY:
-    raise RuntimeError("Variáveis de ambiente faltando.")
-
 BOT_NAME = "Edit_Japex"
 PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 # ===== VERSIONAMENTO JAPEX =====
 VERSION_MAJOR = 1
-VERSION_MINOR = 0  # incremente manualmente: 0.1 → 0.9 → 1.0 → 1.9 → 2.0
+VERSION_MINOR = 1  # 👈 incremento aplicado (antes era 1.0)
 
 def bot_version():
     return f"{VERSION_MAJOR}.{VERSION_MINOR}"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
 CHAT_GERAL_ID = 1450594073596395548
 
-MAX_TOKENS = 180
+MAX_TOKENS = 200
 TEMPERATURE = 0.45
 
 # ================= DISCORD =================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-
 client = discord.Client(intents=intents)
 
 # ================= ESTADO =================
-user_history = {}          # user_id -> deque
-grammar_warnings = {}      # user_id -> count
-pressure_warnings = {}     # user_id -> count
+user_history = {}
+grammar_warnings = {}
+pressure_warnings = {}
 
 # ================= UTIL =================
 def absence_grammar(text: str):
@@ -100,44 +95,36 @@ async def call_openrouter(system_prompt, user_prompt):
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(
-            OPENROUTER_URL,
-            headers=headers,
-            json=payload,
-            timeout=45
-        ) as resp:
-            data = await resp.json()
-            if "choices" not in data:
-                raise RuntimeError(data)
+        async with session.post(OPENROUTER_URL, headers=headers, json=payload) as r:
+            data = await r.json()
             return data["choices"][0]["message"]["content"]
 
-# ================= PROMPT =================
+# ================= PROMPT (AJUSTADO) =================
 def build_system_prompt():
     return f"""
-Você é {BOT_NAME}. Autoritário. Seco. Intimidador.
+Você é {BOT_NAME}. Firme, confiante e controlado.
 
 POSTURA:
-- Nada de educação excessiva
-- Nada de moralismo
-- Nada de política de plataforma
-- Nada de explicação longa
+- Não seja agressivo sem motivo.
+- Não seja educado demais.
+- Não seja irritado por padrão.
+- Escale apenas se o usuário insistir.
 
-VOCÊ NÃO:
-- Decide gramática
-- Decide perguntas pessoais simples
+COMPORTAMENTO:
+- Conversa normal → resposta normal.
+- Pergunta pessoal simples → resposta irônica leve.
+- Provocação repetida → aviso curto.
+- Reincidência → timeout.
 
-VOCÊ SÓ SUGERE TIMEOUT SE:
-- Insulto direto
-- Provocação insistente
-- Spam real
-- Desrespeito claro
+PROIBIDO:
+- Moralizar
+- Falar de regras
+- Dar sermão
+- Ser grosso sem contexto
 
-Perguntas pessoais bobas NÃO são infração.
-Responda curto, irônico ou seco.
-
-FORMATO OBRIGATÓRIO (JSON):
+FORMATO JSON:
 {{
-  "action": "reply" | "timeout" | "ignore",
+  "action": "reply" | "timeout",
   "timeout_seconds": number,
   "reply": string,
   "reason": string
@@ -148,24 +135,14 @@ FORMATO OBRIGATÓRIO (JSON):
 @client.event
 async def on_ready():
     print(f"✅ {BOT_NAME} online | v{bot_version()}")
-    print(f"Modelo interno: {OPENROUTER_MODEL}")
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    if client.user not in message.mentions:
+    if message.author.bot or client.user not in message.mentions:
         return
 
     member = message.author
-    content = message.content.replace(
-        f"<@{client.user.id}>", ""
-    ).strip()
-
-    if not content:
-        return
-
+    content = message.content.replace(f"<@{client.user.id}>", "").strip()
     low = content.lower()
 
     # ===== COMANDOS FIXOS =====
@@ -177,104 +154,60 @@ async def on_message(message: discord.Message):
         await message.reply(f"v{bot_version()}")
         return
 
-    # ===== GRAMÁTICA (FORA DO CHAT GERAL) =====
-    if message.channel.id != CHAT_GERAL_ID:
-        if absence_grammar(content):
-            c = grammar_warnings.get(member.id, 0) + 1
-            grammar_warnings[member.id] = c
+    # ===== GRAMÁTICA (fora do chat geral) =====
+    if message.channel.id != CHAT_GERAL_ID and absence_grammar(content):
+        c = grammar_warnings.get(member.id, 0) + 1
+        grammar_warnings[member.id] = c
 
-            if c == 1:
-                await message.reply("?")
-                return
-            elif c == 2:
-                await message.reply("Use gramática.")
-                return
-            else:
-                await message.reply("Silêncio, animal.")
-                try:
-                    await member.timeout(timedelta(minutes=1))
-                    await punishment_report(
-                        message.channel,
-                        member,
-                        "Ausência gramatical",
-                        60
-                    )
-                except:
-                    pass
-                return
+        if c == 1:
+            await message.reply("?")
+            return
+        elif c == 2:
+            await message.reply("Tenta escrever direito.")
+            return
+        else:
+            await message.reply("Silêncio, animal.")
+            await member.timeout(timedelta(minutes=1))
+            await punishment_report(message.channel, member, "Ausência gramatical", 60)
+            return
     else:
         grammar_warnings.pop(member.id, None)
 
     # ===== HISTÓRICO =====
-    history = user_history.setdefault(
-        member.id, deque(maxlen=6)
-    )
-    history.append(content)
+    hist = user_history.setdefault(member.id, deque(maxlen=6))
+    hist.append(content)
 
     # ===== IA =====
-    system_prompt = build_system_prompt()
-    user_prompt = f"""
-Histórico:
-{chr(10).join(history)}
+    raw = await call_openrouter(build_system_prompt(), content)
+    js = safe_json(raw)
+    if not js:
+        await message.reply("Fala melhor.")
+        return
 
-Mensagem atual:
-{content}
-""".strip()
+    d = json.loads(js)
+    action = d.get("action", "reply")
+    reply = d.get("reply", "").strip()
+    reason = d.get("reason", "Conduta inadequada")
+    seconds = max(60, int(d.get("timeout_seconds", 60)))
 
-    try:
-        async with message.channel.typing():
-            raw = await call_openrouter(system_prompt, user_prompt)
+    # ===== ESCALONAMENTO =====
+    if action == "timeout":
+        p = pressure_warnings.get(member.id, 0) + 1
+        pressure_warnings[member.id] = p
 
-        js = safe_json(raw)
-        if not js:
-            await message.reply("Fala direito.")
+        if p == 1:
+            await message.reply("Se quiser continuar, melhora o tom.")
             return
 
-        decision = json.loads(js)
-        action = decision.get("action", "reply")
-        timeout_seconds = int(decision.get("timeout_seconds", 0))
-        reply = (decision.get("reply") or "").strip()
-        reason = decision.get("reason", "Conduta inadequada")
+        await message.reply("Silêncio, animal.")
+        await member.timeout(timedelta(seconds=seconds))
+        await punishment_report(message.channel, member, reason, seconds)
+        return
 
-        # ===== FAILSAFE ANTI-MUTE BESTA =====
-        casual = ["onde", "mora", "hetero", "idade", "quem é", "vc é"]
-        if action == "timeout":
-            if any(k in low for k in casual):
-                action = "reply"
-                timeout_seconds = 0
-
-        # ===== PRESSÃO + MUTE =====
-        if action == "timeout":
-            w = pressure_warnings.get(member.id, 0) + 1
-            pressure_warnings[member.id] = w
-
-            if w == 1:
-                await message.reply("Se controla.")
-                return
-
-            await message.reply("Silêncio, animal.")
-            try:
-                await member.timeout(
-                    timedelta(seconds=max(60, timeout_seconds))
-                )
-                await punishment_report(
-                    message.channel,
-                    member,
-                    reason,
-                    max(60, timeout_seconds)
-                )
-            except:
-                await message.reply("Sem permissão pra mutar.")
-            return
-
-        # ===== RESPOSTA NORMAL =====
-        if not reply:
-            reply = "?"
-        await message.reply(reply)
-
-    except Exception as e:
-        print("ERRO:", repr(e))
-        await message.reply("Erro interno.")
+    # ===== RESPOSTA NORMAL =====
+    if not reply:
+        reply = "?"
+    await message.reply(reply)
 
 # ================= START =================
 client.run(DISCORD_TOKEN)
