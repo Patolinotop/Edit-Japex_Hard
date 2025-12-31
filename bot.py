@@ -16,7 +16,7 @@ if not DISCORD_TOKEN or not GROQ_API_KEY:
     raise RuntimeError("DISCORD_TOKEN ou GROQ_API_KEY não definidos")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = "mixtral-8x7b-32768"
+MODEL = "llama3-70b-8192"  # ← MODELO ATUAL
 
 INSULTS = ["burro", "idiota", "animal", "imundo", "lixo", "merda"]
 
@@ -90,7 +90,7 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Só responde se for mencionado
+    # Responde só se mencionar
     if client.user not in message.mentions:
         return
 
@@ -106,7 +106,7 @@ async def on_message(message: discord.Message):
 
         content = message.content.replace(f"<@{client.user.id}>", "").strip()
 
-        # Histórico (últimas 5 mensagens)
+        # Histórico (últimas 5)
         history = user_history.setdefault(member.id, deque(maxlen=5))
         history.append(content)
 
