@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from datetime import timedelta
 from collections import deque, Counter
 
-# ================= CONFIG =================
+# ================== CONFIG ==================
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -14,6 +14,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not DISCORD_TOKEN or not GROQ_API_KEY:
     raise RuntimeError("DISCORD_TOKEN ou GROQ_API_KEY não definidos")
+
+# ---- VERSÃO DO BOT ----
+BOT_VERSION = "0.1"  # ← só altera aqui (0.1 → 0.9 → 1.0 → 1.9 → 2.0)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.1-8b-instant"
@@ -25,7 +28,7 @@ INSULTS = [
     "fdp", "viado", "retardado"
 ]
 
-# =========================================
+# ===========================================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -40,14 +43,17 @@ user_history = {}
 BRACKET_REGEX = re.compile(r"\[.*?\]")
 EMOJI_REGEX = re.compile(r"<a?:\w+:\d+>|[\U00010000-\U0010ffff]", re.UNICODE)
 
-# ================= FUNÇÕES =================
+# ================== FUNÇÕES ==================
+
+def clean_role_name(name: str):
+    return BRACKET_REGEX.sub("", name).strip()
 
 def highest_role(member: discord.Member):
     roles = [r for r in member.roles if r.name != "@everyone"]
     if not roles:
-        return "Usuário"
+        return member.display_name
     role = max(roles, key=lambda r: r.position)
-    return BRACKET_REGEX.sub("", role.name).strip()
+    return clean_role_name(role.name) or member.display_name
 
 def read_dados():
     try:
@@ -69,13 +75,14 @@ def emoji_spam(text):
     emojis = EMOJI_REGEX.findall(text)
     if len(emojis) < 4:
         return False
-    most = Counter(emojis).most_common(1)[0][1]
-    return most >= 3
+    return Counter(emojis).most_common(1)[0][1] >= 3
 
 def bad_grammar(text):
-    if len(text) < 6:
+    if text.strip() in ["?", "??", "???"]:
         return True
-    if text.isupper():
+    if len(text) < 3:
+        return True
+    if text.isupper() and len(text) > 5:
         return True
     if not any(c.isalpha() for c in text):
         return True
@@ -93,7 +100,7 @@ async def call_groq(system_prompt, user_prompt):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.3,
+        "temperature": 0.25,
         "max_tokens": MAX_TOKENS
     }
 
@@ -102,13 +109,14 @@ async def call_groq(system_prompt, user_prompt):
             data = await resp.json()
             if "choices" not in data:
                 raise RuntimeError(data)
-            return data["choices"][0]["message"]["content"].strip().rstrip(".") + "."
+            text = data["choices"][0]["message"]["content"].strip()
+            return text.rstrip(".") + "."
 
-# ================= EVENTS =================
+# ================== EVENTS ==================
 
 @client.event
 async def on_ready():
-    print(f"✅ Conectado como {client.user}")
+    print(f"✅ Bot conectado como {client.user} | versão {BOT_VERSION}")
 
 @client.event
 async def on_message(message: discord.Message):
@@ -117,12 +125,16 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Só responde se for mencionado
     if client.user not in message.mentions:
         return
 
     if bot_busy:
-        await message.reply("Já estou respondendo. Aguarde.")
+        return  # ignora completamente (sem responder)
+
+    content = message.content.replace(f"<@{client.user.id}>", "").strip()
+
+    # evita resposta dupla / vazia
+    if not content:
         return
 
     bot_busy = True
@@ -131,11 +143,14 @@ async def on_message(message: discord.Message):
         member = message.author
         role_name = highest_role(member)
 
-        content = message.content.replace(f"<@{client.user.id}>", "").strip()
-
-        # histórico (últimas 5)
+        # histórico (últimas 5 mensagens)
         history = user_history.setdefault(member.id, deque(maxlen=5))
         history.append(content)
+
+        # ===== VERSÃO =====
+        if any(x in content.lower() for x in ["qual versão", "versão do bot", "que versão"]):
+            await message.reply(f"Versão atual: {BOT_VERSION}.")
+            return
 
         # ===== PUNIÇÕES =====
         violation = (
@@ -150,7 +165,7 @@ async def on_message(message: discord.Message):
             offenses[member.id] = count
 
             if count == 1:
-                await message.reply(f"Comporte-se, {role_name}.")
+                await message.reply(f"Se expressa direito, {role_name}.")
                 await member.timeout(timedelta(seconds=60))
             elif count == 2:
                 await message.reply(f"Último aviso, {role_name}.")
@@ -158,33 +173,44 @@ async def on_message(message: discord.Message):
             else:
                 await message.reply(f"Chega, {role_name}.")
                 await member.timeout(timedelta(hours=1))
-
             return
 
         dados = read_dados()
 
+        # ===== PROMPT DEFINITIVO =====
         system_prompt = f"""
 Você é um BOT DE DISCORD.
-Você conversa normalmente.
-Você NÃO inicia conversa com explicações longas.
-Você NÃO cita documentos se não for necessário.
-Você NÃO faz RP.
+Você NÃO está dentro de um jogo.
+Você NÃO executa regras do jogo.
+Você NÃO aplica hierarquia do jogo no Discord.
 
-Os dados abaixo são apenas REFERÊNCIA.
-Use-os somente se a pergunta exigir.
+Os dados abaixo descrevem regras e sistemas DO JOGO,
+apenas para CONSULTA e EXPLICAÇÃO aos usuários.
 
-Se não souber algo ou não constar nos dados,
-admita normalmente.
+No Discord:
+- Converse normalmente
+- Seja direto e claro
+- Não use RP
+- Não dê ordens militares
+- Não exija permissão para falar
 
-Responda curto, claro e natural.
-Sempre termine a resposta com ponto final.
+Use os dados SOMENTE se a pergunta exigir.
+Se não constar, diga que não há registro.
+
+Respostas:
+- Curtas
+- Naturais
+- Com boa gramática
+- Sempre finalizando com ponto final.
 """
 
         user_prompt = f"""
-Dados disponíveis:
+Cargo do usuário: {role_name}
+
+Documentação do jogo:
 {dados}
 
-Pergunta do usuário:
+Mensagem do usuário:
 {content}
 """
 
@@ -194,11 +220,10 @@ Pergunta do usuário:
         await message.reply(reply)
 
     except Exception as e:
-        print("❌ ERRO:", repr(e))
-        await message.reply("Erro ao responder.")
+        print("❌ ERRO REAL:", repr(e))
 
     finally:
         bot_busy = False
 
-# ================= START =================
+# ================== START ==================
 client.run(DISCORD_TOKEN)
