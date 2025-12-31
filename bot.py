@@ -21,7 +21,7 @@ if not TOKEN_DISCORD or not CHAVE_OPENAI:
 openai = OpenAI(api_key=CHAVE_OPENAI)
 
 # ================== MODELS ==================
-MODEL_CHAT = "gpt-5-nano"
+MODEL_CHAT = "gpt-4o"
 MODEL_CTRL = "gpt-5-nano"
 
 MODEL_PUBLIC_NAME = "JapexUltimation1.6"
