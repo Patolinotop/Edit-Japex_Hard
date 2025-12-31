@@ -21,7 +21,7 @@ PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 # ===== VERSIONAMENTO JAPEX =====
 VERSION_MAJOR = 1
-VERSION_MINOR = 1  # 👈 incremento aplicado (antes era 1.0)
+VERSION_MINOR = 2  # 🔼 incremento automático aplicado
 
 def bot_version():
     return f"{VERSION_MAJOR}.{VERSION_MINOR}"
@@ -66,6 +66,23 @@ def safe_json(text: str):
         return text[s:e+1]
     return None
 
+def strip_questions(text: str):
+    """
+    Remove qualquer pergunta ou tentativa de puxar assunto.
+    """
+    text = text.replace("?", "")
+    banned_phrases = [
+        "e você",
+        "posso ajudar",
+        "quer dizer",
+        "pode explicar",
+        "é só",
+        "me diga",
+    ]
+    for b in banned_phrases:
+        text = text.replace(b, "")
+    return text.strip()
+
 async def punishment_report(channel, member, reason, seconds):
     minutes = max(1, seconds // 60)
     await channel.send(
@@ -99,28 +116,27 @@ async def call_openrouter(system_prompt, user_prompt):
             data = await r.json()
             return data["choices"][0]["message"]["content"]
 
-# ================= PROMPT (AJUSTADO) =================
+# ================= PROMPT FINAL =================
 def build_system_prompt():
     return f"""
-Você é {BOT_NAME}. Firme, confiante e controlado.
+Você é {BOT_NAME}. Firme, confiante e direto.
 
-POSTURA:
-- Não seja agressivo sem motivo.
-- Não seja educado demais.
-- Não seja irritado por padrão.
-- Escale apenas se o usuário insistir.
+REGRA ABSOLUTA:
+- NUNCA faça perguntas ao usuário.
+- NUNCA puxe assunto.
+- NUNCA peça esclarecimentos.
+- Sua resposta deve SEMPRE encerrar a interação.
 
-COMPORTAMENTO:
+ESTILO:
+- Respostas curtas.
+- Ironia leve quando cabível.
+- Nenhum tom de assistente.
+
+ESCALONAMENTO:
 - Conversa normal → resposta normal.
-- Pergunta pessoal simples → resposta irônica leve.
-- Provocação repetida → aviso curto.
+- Provocação → aviso curto.
+- Insistência → pressão psicológica.
 - Reincidência → timeout.
-
-PROIBIDO:
-- Moralizar
-- Falar de regras
-- Dar sermão
-- Ser grosso sem contexto
 
 FORMATO JSON:
 {{
@@ -154,7 +170,7 @@ async def on_message(message: discord.Message):
         await message.reply(f"v{bot_version()}")
         return
 
-    # ===== GRAMÁTICA (fora do chat geral) =====
+    # ===== GRAMÁTICA =====
     if message.channel.id != CHAT_GERAL_ID and absence_grammar(content):
         c = grammar_warnings.get(member.id, 0) + 1
         grammar_warnings[member.id] = c
@@ -173,30 +189,25 @@ async def on_message(message: discord.Message):
     else:
         grammar_warnings.pop(member.id, None)
 
-    # ===== HISTÓRICO =====
-    hist = user_history.setdefault(member.id, deque(maxlen=6))
-    hist.append(content)
-
     # ===== IA =====
     raw = await call_openrouter(build_system_prompt(), content)
     js = safe_json(raw)
     if not js:
-        await message.reply("Fala melhor.")
+        await message.reply("Fala direito.")
         return
 
     d = json.loads(js)
     action = d.get("action", "reply")
-    reply = d.get("reply", "").strip()
+    reply = strip_questions((d.get("reply") or "").strip())
     reason = d.get("reason", "Conduta inadequada")
     seconds = max(60, int(d.get("timeout_seconds", 60)))
 
-    # ===== ESCALONAMENTO =====
     if action == "timeout":
         p = pressure_warnings.get(member.id, 0) + 1
         pressure_warnings[member.id] = p
 
         if p == 1:
-            await message.reply("Se quiser continuar, melhora o tom.")
+            await message.reply("Se controla.")
             return
 
         await message.reply("Silêncio, animal.")
@@ -204,7 +215,6 @@ async def on_message(message: discord.Message):
         await punishment_report(message.channel, member, reason, seconds)
         return
 
-    # ===== RESPOSTA NORMAL =====
     if not reply:
         reply = "?"
     await message.reply(reply)
