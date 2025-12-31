@@ -1,6 +1,7 @@
 import os
 import json
 import aiohttp
+import asyncio
 import discord
 from dotenv import load_dotenv
 from datetime import timedelta
@@ -21,7 +22,7 @@ PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 # ===== VERSIONAMENTO JAPEX =====
 VERSION_MAJOR = 1
-VERSION_MINOR = 2  # 🔼 incremento automático aplicado
+VERSION_MINOR = 3  # ⬆️ incremento aplicado
 
 def bot_version():
     return f"{VERSION_MAJOR}.{VERSION_MINOR}"
@@ -42,6 +43,7 @@ client = discord.Client(intents=intents)
 user_history = {}
 grammar_warnings = {}
 pressure_warnings = {}
+bot_busy = False  # 🔥 CONTROLE GLOBAL DE OCUPAÇÃO
 
 # ================= UTIL =================
 def absence_grammar(text: str):
@@ -67,21 +69,19 @@ def safe_json(text: str):
     return None
 
 def strip_questions(text: str):
-    """
-    Remove qualquer pergunta ou tentativa de puxar assunto.
-    """
     text = text.replace("?", "")
-    banned_phrases = [
-        "e você",
-        "posso ajudar",
-        "quer dizer",
-        "pode explicar",
-        "é só",
-        "me diga",
-    ]
-    for b in banned_phrases:
+    banned = ["e você", "posso ajudar", "quer dizer", "me diga"]
+    for b in banned:
         text = text.replace(b, "")
     return text.strip()
+
+def typing_delay(text: str):
+    """
+    Simula tempo humano de digitação.
+    """
+    base = 1.2
+    per_char = min(len(text) * 0.03, 4.0)
+    return base + per_char
 
 async def punishment_report(channel, member, reason, seconds):
     minutes = max(1, seconds // 60)
@@ -116,27 +116,22 @@ async def call_openrouter(system_prompt, user_prompt):
             data = await r.json()
             return data["choices"][0]["message"]["content"]
 
-# ================= PROMPT FINAL =================
+# ================= PROMPT =================
 def build_system_prompt():
     return f"""
 Você é {BOT_NAME}. Firme, confiante e direto.
 
-REGRA ABSOLUTA:
-- NUNCA faça perguntas ao usuário.
-- NUNCA puxe assunto.
-- NUNCA peça esclarecimentos.
-- Sua resposta deve SEMPRE encerrar a interação.
+REGRAS ABSOLUTAS:
+- Nunca faça perguntas.
+- Nunca puxe assunto.
+- Nunca peça esclarecimentos.
+- Responda e encerre.
 
 ESTILO:
-- Respostas curtas.
-- Ironia leve quando cabível.
-- Nenhum tom de assistente.
-
-ESCALONAMENTO:
-- Conversa normal → resposta normal.
-- Provocação → aviso curto.
-- Insistência → pressão psicológica.
-- Reincidência → timeout.
+- Natural
+- Seguro
+- Sem pressa
+- Sem tom de assistente
 
 FORMATO JSON:
 {{
@@ -154,11 +149,22 @@ async def on_ready():
 
 @client.event
 async def on_message(message: discord.Message):
-    if message.author.bot or client.user not in message.mentions:
+    global bot_busy
+
+    if message.author.bot:
+        return
+
+    if client.user not in message.mentions:
+        return
+
+    # 🔥 IGNORA SE ESTIVER OCUPADO
+    if bot_busy:
         return
 
     member = message.author
-    content = message.content.replace(f"<@{client.user.id}>", "").strip()
+    content = message.content.replace(
+        f"<@{client.user.id}>", ""
+    ).strip()
     low = content.lower()
 
     # ===== COMANDOS FIXOS =====
@@ -170,54 +176,85 @@ async def on_message(message: discord.Message):
         await message.reply(f"v{bot_version()}")
         return
 
-    # ===== GRAMÁTICA =====
-    if message.channel.id != CHAT_GERAL_ID and absence_grammar(content):
-        c = grammar_warnings.get(member.id, 0) + 1
-        grammar_warnings[member.id] = c
+    bot_busy = True  # 🔒 trava o bot
 
-        if c == 1:
-            await message.reply("?")
-            return
-        elif c == 2:
-            await message.reply("Tenta escrever direito.")
-            return
+    try:
+        # ===== GRAMÁTICA =====
+        if message.channel.id != CHAT_GERAL_ID and absence_grammar(content):
+            c = grammar_warnings.get(member.id, 0) + 1
+            grammar_warnings[member.id] = c
+
+            async with message.channel.typing():
+                await asyncio.sleep(1.5)
+
+            if c == 1:
+                await message.reply("?")
+                return
+            elif c == 2:
+                await message.reply("Tenta escrever direito.")
+                return
+            else:
+                await message.reply("Silêncio, animal.")
+                await member.timeout(timedelta(minutes=1))
+                await punishment_report(
+                    message.channel,
+                    member,
+                    "Ausência gramatical",
+                    60
+                )
+                return
         else:
+            grammar_warnings.pop(member.id, None)
+
+        # ===== IA =====
+        raw = await call_openrouter(build_system_prompt(), content)
+        js = safe_json(raw)
+        if not js:
+            await message.reply("Fala direito.")
+            return
+
+        d = json.loads(js)
+        action = d.get("action", "reply")
+        reply = strip_questions((d.get("reply") or "").strip())
+        reason = d.get("reason", "Conduta inadequada")
+        seconds = max(60, int(d.get("timeout_seconds", 60)))
+
+        # ===== DIGITANDO =====
+        delay = typing_delay(reply)
+        async with message.channel.typing():
+            await asyncio.sleep(delay)
+
+        # ===== ESCALONAMENTO =====
+        if action == "timeout":
+            p = pressure_warnings.get(member.id, 0) + 1
+            pressure_warnings[member.id] = p
+
+            if p == 1:
+                await message.reply("Se controla.")
+                return
+
             await message.reply("Silêncio, animal.")
-            await member.timeout(timedelta(minutes=1))
-            await punishment_report(message.channel, member, "Ausência gramatical", 60)
-            return
-    else:
-        grammar_warnings.pop(member.id, None)
-
-    # ===== IA =====
-    raw = await call_openrouter(build_system_prompt(), content)
-    js = safe_json(raw)
-    if not js:
-        await message.reply("Fala direito.")
-        return
-
-    d = json.loads(js)
-    action = d.get("action", "reply")
-    reply = strip_questions((d.get("reply") or "").strip())
-    reason = d.get("reason", "Conduta inadequada")
-    seconds = max(60, int(d.get("timeout_seconds", 60)))
-
-    if action == "timeout":
-        p = pressure_warnings.get(member.id, 0) + 1
-        pressure_warnings[member.id] = p
-
-        if p == 1:
-            await message.reply("Se controla.")
+            await member.timeout(timedelta(seconds=seconds))
+            await punishment_report(
+                message.channel,
+                member,
+                reason,
+                seconds
+            )
             return
 
-        await message.reply("Silêncio, animal.")
-        await member.timeout(timedelta(seconds=seconds))
-        await punishment_report(message.channel, member, reason, seconds)
-        return
+        if not reply:
+            reply = "?"
+        await message.reply(reply)
 
-    if not reply:
-        reply = "?"
-    await message.reply(reply)
+    except Exception as e:
+        print("ERRO:", repr(e))
+        async with message.channel.typing():
+            await asyncio.sleep(1.5)
+        await message.reply("Erro interno.")
+
+    finally:
+        bot_busy = False  # 🔓 libera o bot
 
 # ================= START =================
 client.run(DISCORD_TOKEN)
