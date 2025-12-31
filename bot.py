@@ -4,9 +4,9 @@ import re
 import aiohttp
 from dotenv import load_dotenv
 from datetime import timedelta
-from collections import deque
+from collections import deque, Counter
 
-# ================== CONFIG ==================
+# ================= CONFIG =================
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -16,11 +16,16 @@ if not DISCORD_TOKEN or not GROQ_API_KEY:
     raise RuntimeError("DISCORD_TOKEN ou GROQ_API_KEY não definidos")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = "llama-3.1-8b-instant"  # MODELO ATUAL E ATIVO
+MODEL = "llama-3.1-8b-instant"
 
-INSULTS = ["burro", "idiota", "animal", "imundo", "lixo", "merda", "fdp", "viado"]
+MAX_TOKENS = 30
 
-# ===========================================
+INSULTS = [
+    "burro", "idiota", "animal", "imundo", "lixo", "merda",
+    "fdp", "viado", "retardado"
+]
+
+# =========================================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -33,8 +38,9 @@ offenses = {}
 user_history = {}
 
 BRACKET_REGEX = re.compile(r"\[.*?\]")
+EMOJI_REGEX = re.compile(r"<a?:\w+:\d+>|[\U00010000-\U0010ffff]", re.UNICODE)
 
-# ================== FUNÇÕES ==================
+# ================= FUNÇÕES =================
 
 def highest_role(member: discord.Member):
     roles = [r for r in member.roles if r.name != "@everyone"]
@@ -50,9 +56,30 @@ def read_dados():
     except:
         return ""
 
-def is_insult(text: str):
+def is_insult(text):
     t = text.lower()
     return any(word in t for word in INSULTS)
+
+def is_spam(history):
+    if len(history) < 3:
+        return False
+    return len(set(history)) == 1
+
+def emoji_spam(text):
+    emojis = EMOJI_REGEX.findall(text)
+    if len(emojis) < 4:
+        return False
+    most = Counter(emojis).most_common(1)[0][1]
+    return most >= 3
+
+def bad_grammar(text):
+    if len(text) < 6:
+        return True
+    if text.isupper():
+        return True
+    if not any(c.isalpha() for c in text):
+        return True
+    return False
 
 async def call_groq(system_prompt, user_prompt):
     headers = {
@@ -67,7 +94,7 @@ async def call_groq(system_prompt, user_prompt):
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 0.3,
-        "max_tokens": 20
+        "max_tokens": MAX_TOKENS
     }
 
     async with aiohttp.ClientSession() as session:
@@ -75,9 +102,9 @@ async def call_groq(system_prompt, user_prompt):
             data = await resp.json()
             if "choices" not in data:
                 raise RuntimeError(data)
-            return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]["content"].strip().rstrip(".") + "."
 
-# ================== EVENTS ==================
+# ================= EVENTS =================
 
 @client.event
 async def on_ready():
@@ -90,7 +117,7 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Só responde se mencionar o bot
+    # Só responde se for mencionado
     if client.user not in message.mentions:
         return
 
@@ -106,86 +133,72 @@ async def on_message(message: discord.Message):
 
         content = message.content.replace(f"<@{client.user.id}>", "").strip()
 
-        # Histórico (últimas 5 mensagens do usuário)
+        # histórico (últimas 5)
         history = user_history.setdefault(member.id, deque(maxlen=5))
         history.append(content)
 
-        # ===== XINGAMENTO / OFENSA =====
-        if is_insult(content):
+        # ===== PUNIÇÕES =====
+        violation = (
+            is_insult(content)
+            or is_spam(history)
+            or emoji_spam(content)
+            or bad_grammar(content)
+        )
+
+        if violation:
             count = offenses.get(member.id, 0) + 1
             offenses[member.id] = count
 
             if count == 1:
-                await message.reply(f"Fala direito, {role_name}. Animal.")
+                await message.reply(f"Comporte-se, {role_name}.")
                 await member.timeout(timedelta(seconds=60))
             elif count == 2:
-                await message.reply(f"Já avisei, {role_name}. Imundo.")
-                await member.timeout(timedelta(hours=1))
+                await message.reply(f"Último aviso, {role_name}.")
+                await member.timeout(timedelta(minutes=10))
             else:
                 await message.reply(f"Chega, {role_name}.")
-                await member.timeout(timedelta(hours=3))
+                await member.timeout(timedelta(hours=1))
 
             return
 
         dados = read_dados()
 
-        # ===== PROMPT CORRIGIDO (SEM RP) =====
         system_prompt = f"""
 Você é um BOT DE DISCORD.
-Você NÃO está dentro de um jogo, RP ou simulação.
-Você NÃO executa ações do sistema descrito.
-Você NÃO interpreta personagens.
+Você conversa normalmente.
+Você NÃO inicia conversa com explicações longas.
+Você NÃO cita documentos se não for necessário.
+Você NÃO faz RP.
 
-Os dados abaixo são APENAS DOCUMENTAÇÃO e REGRAS
-para explicar aos usuários como o sistema funciona.
+Os dados abaixo são apenas REFERÊNCIA.
+Use-os somente se a pergunta exigir.
 
-Seu papel:
-- Conversar normalmente no Discord
-- Ajudar com dúvidas
-- Explicar regras e hierarquia
-- Ser direto e claro
+Se não souber algo ou não constar nos dados,
+admita normalmente.
 
-IMPORTANTE:
-- Nunca trate o usuário como se estivesse em treinamento, fila ou alistamento
-- Nunca diga que alguém foi aprovado ou reprovado
-- Nunca assuma que algo está acontecendo no sistema
-- Apenas explique, nunca simule
-
-Tom:
-- Natural
-- Direto
-- Sem RP
-- Sem moralismo
-- Sem formalidade excessiva
-
-Use SOMENTE os dados abaixo como referência factual.
-Se algo não constar, diga que não há registro.
-
-DOCUMENTAÇÃO:
-{dados}
+Responda curto, claro e natural.
+Sempre termine a resposta com ponto final.
 """
 
         user_prompt = f"""
-Cargo do usuário: {role_name}
+Dados disponíveis:
+{dados}
 
-Histórico recente:
-{chr(10).join(history)}
-
-Pergunta atual:
+Pergunta do usuário:
 {content}
 """
 
         async with message.channel.typing():
             reply = await call_groq(system_prompt, user_prompt)
 
-        await message.reply(reply[:2000])
+        await message.reply(reply)
 
     except Exception as e:
-        print("❌ ERRO REAL:", repr(e))
+        print("❌ ERRO:", repr(e))
         await message.reply("Erro ao responder.")
 
     finally:
         bot_busy = False
 
-# ================== START ==================
+# ================= START =================
 client.run(DISCORD_TOKEN)
