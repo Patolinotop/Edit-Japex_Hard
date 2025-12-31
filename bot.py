@@ -137,3 +137,4 @@ Pergunta atual:
     bot_busy = False
 
 client.run(DISCORD_TOKEN)
+
