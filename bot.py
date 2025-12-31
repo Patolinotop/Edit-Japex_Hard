@@ -15,18 +15,28 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not DISCORD_TOKEN or not GROQ_API_KEY:
     raise RuntimeError("DISCORD_TOKEN ou GROQ_API_KEY não definidos")
 
-# IDENTIDADE
 BOT_NAME = "JapexEvolutionX"
-BOT_VERSION = "0.3"
+BOT_VERSION = "0.4"
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.1-8b-instant"
+MAX_TOKENS = 60
 
-MAX_TOKENS = 60  # LIMITE DURO
-
+# ===== LISTAS CRÍTICAS =====
 INSULTS = [
     "burro", "idiota", "animal", "imundo", "lixo", "merda",
-    "fdp", "viado", "retardado"
+    "fdp", "viado", "retardado", "inutil", "bisonho"
+]
+
+# Frases PROIBIDAS de aparecer na resposta
+FORBIDDEN_OUTPUT = [
+    "alistamento", "recrutamento", "fila", "aguarde",
+    "não pode falar", "permaneça", "aprovado", "reprovado"
+]
+
+# Saudações simples (não chamam IA)
+GREETINGS = [
+    "oi", "ola", "olá", "boa noite", "bom dia", "boa tarde"
 ]
 
 # =========================================
@@ -60,15 +70,16 @@ def read_dados():
     except:
         return ""
 
-def is_insult(text):
-    return any(w in text.lower() for w in INSULTS)
-
-def is_spam(history):
-    return len(history) >= 3 and len(set(history)) == 1
+def contains_insult(text):
+    t = text.lower()
+    return any(w in t for w in INSULTS)
 
 def emoji_spam(text):
     emojis = EMOJI_REGEX.findall(text)
     return len(emojis) >= 4 and Counter(emojis).most_common(1)[0][1] >= 3
+
+def is_spam(history):
+    return len(history) >= 3 and len(set(history)) == 1
 
 def bad_grammar(text):
     if text.strip() in ["?", "??", "???"]:
@@ -80,6 +91,13 @@ def bad_grammar(text):
     if not any(c.isalpha() for c in text):
         return True
     return False
+
+def sanitize_output(text: str):
+    low = text.lower()
+    for bad in FORBIDDEN_OUTPUT:
+        if bad in low:
+            return "Isso é explicado nos dados quando perguntado diretamente."
+    return text
 
 async def call_groq(system_prompt, user_prompt):
     headers = {
@@ -103,7 +121,8 @@ async def call_groq(system_prompt, user_prompt):
             if "choices" not in data:
                 raise RuntimeError(data)
             text = data["choices"][0]["message"]["content"].strip()
-            return text.rstrip(".") + "."
+            text = text.rstrip(".") + "."
+            return sanitize_output(text)
 
 # ================= EVENTS =================
 
@@ -121,79 +140,73 @@ async def on_message(message: discord.Message):
     if client.user not in message.mentions:
         return
 
-    if bot_busy:
+    content = message.content.replace(f"<@{client.user.id}>", "").strip().lower()
+    if not content:
         return
 
-    content = message.content.replace(f"<@{client.user.id}>", "").strip()
-    if not content:
+    member = message.author
+    role_name = highest_role(member)
+
+    # ===== HISTÓRICO =====
+    history = user_history.setdefault(member.id, deque(maxlen=5))
+    history.append(content)
+
+    # ===== XINGAMENTO: SEMPRE PRIORIDADE =====
+    if contains_insult(content):
+        offenses[member.id] = offenses.get(member.id, 0) + 1
+        await message.reply("Silêncio, animal!")
+        try:
+            await member.timeout(timedelta(minutes=10))
+        except:
+            pass
+        return
+
+    # ===== SAUDAÇÕES: NÃO CHAMA IA =====
+    if content in GREETINGS:
+        await message.reply("Boa noite.")
+        return
+
+    # ===== SPAM / EMOJI / LIXO =====
+    if is_spam(history) or emoji_spam(content) or bad_grammar(content):
+        await message.reply("Para de spammar.")
+        try:
+            await member.timeout(timedelta(minutes=5))
+        except:
+            pass
+        return
+
+    # ===== MODELO / VERSÃO =====
+    if "versão" in content:
+        await message.reply(f"Versão atual: {BOT_VERSION}.")
+        return
+
+    if "modelo" in content:
+        await message.reply(f"{BOT_NAME} v{BOT_VERSION}.")
+        return
+
+    if bot_busy:
         return
 
     bot_busy = True
 
     try:
-        member = message.author
-        role_name = highest_role(member)
-
-        history = user_history.setdefault(member.id, deque(maxlen=5))
-        history.append(content)
-
-        low = content.lower()
-
-        # ===== MODELO / VERSÃO =====
-        if "versão" in low:
-            await message.reply(f"Versão atual: {BOT_VERSION}.")
-            return
-
-        if "modelo" in low:
-            await message.reply(f"{BOT_NAME} v{BOT_VERSION}.")
-            return
-
-        # ===== PUNIÇÃO DISCORD =====
-        violation = (
-            is_insult(content)
-            or is_spam(history)
-            or emoji_spam(content)
-            or bad_grammar(content)
-        )
-
-        if violation:
-            count = offenses.get(member.id, 0) + 1
-            offenses[member.id] = count
-
-            if count == 1:
-                await message.reply(f"Se expressa melhor, {role_name}.")
-                await member.timeout(timedelta(seconds=60))
-            elif count == 2:
-                await message.reply(f"Último aviso, {role_name}.")
-                await member.timeout(timedelta(minutes=10))
-            else:
-                await message.reply(f"Chega, {role_name}.")
-                await member.timeout(timedelta(hours=1))
-            return
-
         dados = read_dados()
 
-        # ===== PROMPT DE CONTROLE DE TEXTO =====
         system_prompt = f"""
 Você é {BOT_NAME}, um bot de Discord.
-Fale como uma pessoa normal.
+REGRAS ABSOLUTAS:
+- Nunca assuma recrutamento ativo.
+- Nunca faça perguntas sobre alistamento.
+- Nunca use linguagem operacional do jogo.
+- Nunca dê ordens.
+- Não inicie conversa.
+- Vá direto à resposta.
+- Use os dados apenas se a pergunta for EXPLÍCITA.
 
-REGRAS DE TEXTO (OBRIGATÓRIAS):
-- Não cumprimente.
-- Não explique o que vai fazer.
-- Não diga que é um bot.
-- Vá direto ao conteúdo.
-- Perguntas simples: 1 frase curta.
-- Perguntas médias: no máximo 2 frases.
-- Só use 3 frases se for realmente necessário.
-- Nunca faça introdução vazia.
-- Sempre termine com ponto final.
+Responda curto, direto e normal.
+Sempre finalize com ponto final.
 
-Os dados abaixo são DOCUMENTAÇÃO DO JOGO,
-usados apenas para EXPLICAR quando perguntado.
-Nunca aja como se o jogo estivesse acontecendo.
-
-DOCUMENTAÇÃO:
+DOCUMENTAÇÃO (PASSIVA):
 {dados}
 """
 
