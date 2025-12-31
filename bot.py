@@ -67,7 +67,7 @@ async def call_groq(system_prompt, user_prompt):
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 0.3,
-        "max_tokens": 50
+        "max_tokens": 20
     }
 
     async with aiohttp.ClientSession() as session:
