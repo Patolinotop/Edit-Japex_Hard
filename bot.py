@@ -25,7 +25,7 @@ openai = OpenAI(api_key=CHAVE_OPENAI)
 # =========================================================
 # MODELO ÚNICO
 # =========================================================
-MODEL_MAIN = "gpt-4o"
+MODEL_MAIN = "gpt-5-mini"
 MODEL_PUBLIC_NAME = "JapexUltimation2.0"
 
 # =========================================================
