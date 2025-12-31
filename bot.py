@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from datetime import timedelta
 from collections import deque
 
-# ================= CONFIG =================
+# ================== CONFIG ==================
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -16,11 +16,11 @@ if not DISCORD_TOKEN or not GROQ_API_KEY:
     raise RuntimeError("DISCORD_TOKEN ou GROQ_API_KEY não definidos")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = "llama-3.1-8b-instant"  # ✅ MODELO ATUAL E ATIVO
+MODEL = "llama-3.1-8b-instant"  # MODELO ATUAL E ATIVO
 
-INSULTS = ["burro", "idiota", "animal", "imundo", "lixo", "merda"]
+INSULTS = ["burro", "idiota", "animal", "imundo", "lixo", "merda", "fdp", "viado"]
 
-# =========================================
+# ===========================================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -34,7 +34,7 @@ user_history = {}
 
 BRACKET_REGEX = re.compile(r"\[.*?\]")
 
-# ================= FUNÇÕES =================
+# ================== FUNÇÕES ==================
 
 def highest_role(member: discord.Member):
     roles = [r for r in member.roles if r.name != "@everyone"]
@@ -77,7 +77,7 @@ async def call_groq(system_prompt, user_prompt):
                 raise RuntimeError(data)
             return data["choices"][0]["message"]["content"]
 
-# ================= EVENTS =================
+# ================== EVENTS ==================
 
 @client.event
 async def on_ready():
@@ -106,17 +106,17 @@ async def on_message(message: discord.Message):
 
         content = message.content.replace(f"<@{client.user.id}>", "").strip()
 
-        # Histórico (últimas 5 mensagens)
+        # Histórico (últimas 5 mensagens do usuário)
         history = user_history.setdefault(member.id, deque(maxlen=5))
         history.append(content)
 
-        # ===== XINGAMENTO =====
+        # ===== XINGAMENTO / OFENSA =====
         if is_insult(content):
             count = offenses.get(member.id, 0) + 1
             offenses[member.id] = count
 
             if count == 1:
-                await message.reply(f"Silêncio, {role_name}. Animal.")
+                await message.reply(f"Fala direito, {role_name}. Animal.")
                 await member.timeout(timedelta(seconds=60))
             elif count == 2:
                 await message.reply(f"Já avisei, {role_name}. Imundo.")
@@ -129,16 +129,40 @@ async def on_message(message: discord.Message):
 
         dados = read_dados()
 
+        # ===== PROMPT CORRIGIDO (SEM RP) =====
         system_prompt = f"""
-Você é uma IA ajudante de servidor Discord.
-Responda curto, direto e com boa gramática.
-Não seja moralista nem formal demais.
-Não invente informações.
+Você é um BOT DE DISCORD.
+Você NÃO está dentro de um jogo, RP ou simulação.
+Você NÃO executa ações do sistema descrito.
+Você NÃO interpreta personagens.
 
-Use SOMENTE os dados abaixo como fonte de verdade:
+Os dados abaixo são APENAS DOCUMENTAÇÃO e REGRAS
+para explicar aos usuários como o sistema funciona.
+
+Seu papel:
+- Conversar normalmente no Discord
+- Ajudar com dúvidas
+- Explicar regras e hierarquia
+- Ser direto e claro
+
+IMPORTANTE:
+- Nunca trate o usuário como se estivesse em treinamento, fila ou alistamento
+- Nunca diga que alguém foi aprovado ou reprovado
+- Nunca assuma que algo está acontecendo no sistema
+- Apenas explique, nunca simule
+
+Tom:
+- Natural
+- Direto
+- Sem RP
+- Sem moralismo
+- Sem formalidade excessiva
+
+Use SOMENTE os dados abaixo como referência factual.
+Se algo não constar, diga que não há registro.
+
+DOCUMENTAÇÃO:
 {dados}
-
-Se a informação não existir nos dados, diga que não há registro.
 """
 
         user_prompt = f"""
@@ -163,5 +187,5 @@ Pergunta atual:
     finally:
         bot_busy = False
 
-# ================= START =================
+# ================== START ==================
 client.run(DISCORD_TOKEN)
