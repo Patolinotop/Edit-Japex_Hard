@@ -51,7 +51,7 @@ SUPPORT_CHANNEL_MENTION = f"<#{SUPPORT_CHANNEL_ID}>"
 JAPEX_MENTION = f"<@{JAPEX_ID}>"
 
 CHEFOES_PUBLICOS = [
-    ("japex", "Fundador", 0),
+    ("japex_hard", "Fundador", 0),
     ("lalomaio", "Criador do Exército", 1),
     ("santiago", "Administrador", 2),
     ("purtuga", "Supremo Tribunal Militar", 3),
