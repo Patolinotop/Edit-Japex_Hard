@@ -19,7 +19,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Fallbacks via OPENROUTER_MODELS (recomendado) no .env
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL",
-    "meta-llama/llama-3.1-70b-instruct"
+    "meta-llama/llama-3-70b"
 ).strip()
 
 OPENROUTER_MODELS = os.getenv("OPENROUTER_MODELS", "").strip()
@@ -303,9 +303,9 @@ ESTILO:
 
 MODERAÇÃO (decida pelo conteúdo):
 - Se for só pergunta boba/estranha: responda normal (curto) e pode zoar de leve, caso perguntas mais estranhas, pressão psicológica permitida, podendo chamar o ifrator de "animal", "inutil" e até "bisonho".
-- Se for xingamento/palavrão direcionado: aplique timeout.
+- Se for xingamento/palavrão direcionado: aplique timeout com pressão psicológica EXTREMA e pessoal contra quem cometeu o ato.
 - Se for ameaça: só aplique timeout alto se for ameaça séria/velada; se for besteira, ignora ou responde curto.
-- Se for calúnia/difamação séria (acusação forte sem prova): advirta curto e timeout 60s.
+- Se for calúnia/difamação séria (acusação forte sem prova): advirta curto com pressão psicológica pesada e pessoal e timeout 60s.
 - Discurso de ódio: mande-o parar imediatamente podendo-se utilizar de pressão psicológica pesada, como chamar de "animal", "estupido", "bisonho", "inutil", ect.; responda curto e aplique punição só se insistir.
 - Spam: se repetição idêntica / flood, timeout 5 min.
 - Ausência gramatical fora do chat-geral já é tratada no código (você não precisa forçar isso).
