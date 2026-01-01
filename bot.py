@@ -5,7 +5,6 @@ import asyncio
 import discord
 from dotenv import load_dotenv
 from datetime import timedelta
-from collections import deque
 
 # ================= CONFIG =================
 load_dotenv()
@@ -20,17 +19,13 @@ OPENROUTER_MODEL = os.getenv(
 BOT_NAME = "Edit_Japex"
 PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
-# ===== VERSIONAMENTO JAPEX =====
 VERSION_MAJOR = 1
-VERSION_MINOR = 3  # ⬆️ incremento aplicado
-
-def bot_version():
-    return f"{VERSION_MAJOR}.{VERSION_MINOR}"
+VERSION_MINOR = 4  # ⬆️ atualização
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 CHAT_GERAL_ID = 1450594073596395548
 
-MAX_TOKENS = 200
+MAX_TOKENS = 250
 TEMPERATURE = 0.45
 
 # ================= DISCORD =================
@@ -39,11 +34,20 @@ intents.message_content = True
 intents.members = True
 client = discord.Client(intents=intents)
 
-# ================= ESTADO =================
-user_history = {}
+bot_busy = False
 grammar_warnings = {}
 pressure_warnings = {}
-bot_busy = False  # 🔥 CONTROLE GLOBAL DE OCUPAÇÃO
+
+# ================= FILE LOAD =================
+def load_file(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+REGRAS_TXT = load_file("regras.txt")
+DADOS_TXT = load_file("dados.txt")
 
 # ================= UTIL =================
 def absence_grammar(text: str):
@@ -60,8 +64,6 @@ def absence_grammar(text: str):
 
 def safe_json(text: str):
     text = text.strip()
-    if text.startswith("{") and text.endswith("}"):
-        return text
     s = text.find("{")
     e = text.rfind("}")
     if s != -1 and e != -1 and e > s:
@@ -69,19 +71,13 @@ def safe_json(text: str):
     return None
 
 def strip_questions(text: str):
-    text = text.replace("?", "")
-    banned = ["e você", "posso ajudar", "quer dizer", "me diga"]
+    banned = ["?", "e você", "posso ajudar", "quer dizer", "me diga"]
     for b in banned:
         text = text.replace(b, "")
     return text.strip()
 
 def typing_delay(text: str):
-    """
-    Simula tempo humano de digitação.
-    """
-    base = 1.2
-    per_char = min(len(text) * 0.03, 4.0)
-    return base + per_char
+    return 1.2 + min(len(text) * 0.03, 4.0)
 
 async def punishment_report(channel, member, reason, seconds):
     minutes = max(1, seconds // 60)
@@ -107,8 +103,7 @@ async def call_openrouter(system_prompt, user_prompt):
             {"role": "user", "content": user_prompt}
         ],
         "temperature": TEMPERATURE,
-        "max_tokens": MAX_TOKENS,
-        "response_format": {"type": "json_object"}
+        "max_tokens": MAX_TOKENS
     }
 
     async with aiohttp.ClientSession() as session:
@@ -119,21 +114,27 @@ async def call_openrouter(system_prompt, user_prompt):
 # ================= PROMPT =================
 def build_system_prompt():
     return f"""
-Você é {BOT_NAME}. Firme, confiante e direto.
+Você é {BOT_NAME}. Direto, firme e consciente.
 
-REGRAS ABSOLUTAS:
+══════════ REGRAS ABSOLUTAS ══════════
+{REGRAS_TXT}
+
+══════════ BASE DE DADOS (SUPORTE) ══════════
+{DADOS_TXT}
+
+USO DOS DADOS:
+- Os dados acima NÃO são verdades absolutas.
+- NÃO siga como RP.
+- Use SOMENTE se a mensagem do usuário for uma dúvida relacionada.
+- Se não fizer sentido, ignore completamente.
+- Nunca cite o arquivo ou diga que está usando dados.
+
+COMPORTAMENTO:
 - Nunca faça perguntas.
 - Nunca puxe assunto.
-- Nunca peça esclarecimentos.
 - Responda e encerre.
 
-ESTILO:
-- Natural
-- Seguro
-- Sem pressa
-- Sem tom de assistente
-
-FORMATO JSON:
+FORMATO DE RESPOSTA (JSON):
 {{
   "action": "reply" | "timeout",
   "timeout_seconds": number,
@@ -145,7 +146,7 @@ FORMATO JSON:
 # ================= EVENTS =================
 @client.event
 async def on_ready():
-    print(f"✅ {BOT_NAME} online | v{bot_version()}")
+    print(f"✅ {BOT_NAME} online | v{VERSION_MAJOR}.{VERSION_MINOR}")
 
 @client.event
 async def on_message(message: discord.Message):
@@ -157,58 +158,47 @@ async def on_message(message: discord.Message):
     if client.user not in message.mentions:
         return
 
-    # 🔥 IGNORA SE ESTIVER OCUPADO
     if bot_busy:
         return
 
     member = message.author
-    content = message.content.replace(
-        f"<@{client.user.id}>", ""
-    ).strip()
+    content = message.content.replace(f"<@{client.user.id}>", "").strip()
     low = content.lower()
 
-    # ===== COMANDOS FIXOS =====
     if "modelo" in low:
         await message.reply(PUBLIC_MODEL_NAME)
         return
 
     if "versão" in low or "versao" in low:
-        await message.reply(f"v{bot_version()}")
+        await message.reply(f"v{VERSION_MAJOR}.{VERSION_MINOR}")
         return
 
-    bot_busy = True  # 🔒 trava o bot
+    bot_busy = True
 
     try:
-        # ===== GRAMÁTICA =====
         if message.channel.id != CHAT_GERAL_ID and absence_grammar(content):
             c = grammar_warnings.get(member.id, 0) + 1
             grammar_warnings[member.id] = c
 
-            async with message.channel.typing():
-                await asyncio.sleep(1.5)
+            await asyncio.sleep(1.2)
 
             if c == 1:
                 await message.reply("?")
                 return
             elif c == 2:
-                await message.reply("Tenta escrever direito.")
+                await message.reply("Escreve direito.")
                 return
             else:
-                await message.reply("Silêncio, animal.")
+                await message.reply("Silêncio.")
                 await member.timeout(timedelta(minutes=1))
-                await punishment_report(
-                    message.channel,
-                    member,
-                    "Ausência gramatical",
-                    60
-                )
+                await punishment_report(message.channel, member, "Spam", 60)
                 return
         else:
             grammar_warnings.pop(member.id, None)
 
-        # ===== IA =====
         raw = await call_openrouter(build_system_prompt(), content)
         js = safe_json(raw)
+
         if not js:
             await message.reply("Fala direito.")
             return
@@ -219,42 +209,25 @@ async def on_message(message: discord.Message):
         reason = d.get("reason", "Conduta inadequada")
         seconds = max(60, int(d.get("timeout_seconds", 60)))
 
-        # ===== DIGITANDO =====
-        delay = typing_delay(reply)
-        async with message.channel.typing():
-            await asyncio.sleep(delay)
+        await asyncio.sleep(typing_delay(reply))
 
-        # ===== ESCALONAMENTO =====
         if action == "timeout":
-            p = pressure_warnings.get(member.id, 0) + 1
-            pressure_warnings[member.id] = p
-
-            if p == 1:
-                await message.reply("Se controla.")
-                return
-
-            await message.reply("Silêncio, animal.")
+            await message.reply("Se controla.")
             await member.timeout(timedelta(seconds=seconds))
-            await punishment_report(
-                message.channel,
-                member,
-                reason,
-                seconds
-            )
+            await punishment_report(message.channel, member, reason, seconds)
             return
 
         if not reply:
             reply = "?"
+
         await message.reply(reply)
 
     except Exception as e:
         print("ERRO:", repr(e))
-        async with message.channel.typing():
-            await asyncio.sleep(1.5)
         await message.reply("Erro interno.")
 
     finally:
-        bot_busy = False  # 🔓 libera o bot
+        bot_busy = False
 
 # ================= START =================
 client.run(DISCORD_TOKEN)
