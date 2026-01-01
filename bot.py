@@ -19,7 +19,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Fallbacks via OPENROUTER_MODELS (recomendado) no .env
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL",
-    "mistralai/mixtral-8x7b-instruct"
+    "nousresearch/nous-hermes-2-mixtral-8x7b-sft"
 ).strip()
 
 OPENROUTER_MODELS = os.getenv("OPENROUTER_MODELS", "").strip()
