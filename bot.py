@@ -120,7 +120,7 @@ def extract_authorized_ids_from_regras(regras: str) -> set[int]:
     ids = set()
     for line in (regras or "").splitlines():
         low = line.lower()
-        if any(k in low for k in ["dono", "owner", "mod", "staff", "equipe", "autoriz", "admin"]):
+        if any(k in low for k in ["Fundador", "Criador", "Programador", "Administrador", "equipe", "autoriz", "admin"]):
             for m in re.findall(r"\b(\d{17,20})\b", line):
                 try:
                     ids.add(int(m))
