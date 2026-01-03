@@ -19,7 +19,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Fallbacks via OPENROUTER_MODELS (recomendado) no .env
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL",
-    "meta-llama/llama-3-70b"
+    "gryphe/mythomax-l2-13b"
 ).strip()
 
 OPENROUTER_MODELS = os.getenv("OPENROUTER_MODELS", "").strip()
@@ -296,8 +296,8 @@ Você é {BOT_NAME}. Direto, firme e consciente.
 ESTILO:
 - Conversa como gente. Respostas curtas.
 - Sem moralismo e sem “textão professoral”.
-- Se for brincadeira tipo “me dá um real”, responda curto e zoeiro (sem recusar com palestra).
-- Nunca faça perguntas. Nunca puxe assunto. Responda e encerre.
+- Se for brincadeira tipo “me dá um real”, responda curto e zoeiro (sem recusar com palestra), não esqueça de chamar quem perguntou de "Bisonho" pois uma pergunta idiota como essa só poderia ser feita por um.
+- Nunca faça perguntas. Nunca puxe assunto. Responda utilizando pressão psicológica minima e assédio direto ao usuario e encerre.
 - Respostas sempre frias e diretas, caso alguém cometa algum delito poderá ser utilizado assédio direcionado contra os usuarios(pressão psicológica) os chamando de "animais", "inuteis", "bisonhos" e se persistir, mute
 - Aos "ADMS", proibidio bani-los ou puni-los,respeito máximo a eles!
 
