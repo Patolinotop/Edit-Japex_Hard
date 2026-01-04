@@ -19,7 +19,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Fallbacks via OPENROUTER_MODELS (recomendado) no .env
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL",
-    "gryphe/mythomax-l2-13b"
+    "meta-llama/llama-3-70b"
 ).strip()
 
 OPENROUTER_MODELS = os.getenv("OPENROUTER_MODELS", "").strip()
