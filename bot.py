@@ -15,14 +15,9 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# Modelo principal (texto / moderação normal)
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b").strip()
 OPENROUTER_MODELS = os.getenv("OPENROUTER_MODELS", "").strip()  # fallback list (csv)
 
-# Modelos especiais
-# - VISION_MODEL: deve ser um modelo que aceite imagem (ex: openai/gpt-4o-mini)
-# - ATTACHMENT_TEXT_MODEL: para anexos de texto (txt) e parsing rápido
-# - COMMAND_MODEL: para interpretar comandos admin (fallback)
 VISION_MODEL = os.getenv("VISION_MODEL", "openai/gpt-4o-mini").strip()
 ATTACHMENT_TEXT_MODEL = os.getenv("ATTACHMENT_TEXT_MODEL", "openai/gpt-5-nano").strip()
 COMMAND_MODEL = os.getenv("COMMAND_MODEL", "openai/gpt-5-nano").strip()
@@ -31,29 +26,25 @@ BOT_NAME = "Edit_Japex"
 PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 VERSION_MAJOR = 1
-VERSION_MINOR = 8
+VERSION_MINOR = 9
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Chat onde ausência gramatical é permitida
-CHAT_GERAL_ID = 1450594073596395548
+CHAT_GERAL_ID = int(os.getenv("CHAT_GERAL_ID", "1450594073596395548"))
 
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "300"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.55"))
+
 REQUEST_TIMEOUT_S = int(os.getenv("REQUEST_TIMEOUT_S", "45"))
+VISION_TIMEOUT_S = int(os.getenv("VISION_TIMEOUT_S", "75"))  # imagens às vezes demoram mais
 EXTRA_TYPING_SECONDS = float(os.getenv("EXTRA_TYPING_SECONDS", "2.0"))
 
-# Admins (fallback) - csv de ids: "123,456"
 AUTHORIZED_IDS_ENV = os.getenv("AUTHORIZED_IDS", "").strip()
-
-# Estado persistente (memória de ordens/admin)
 STATE_FILE = os.getenv("STATE_FILE", "admin_state.json")
 
-# Janela de histórico para spam/insistência
 HIST_MAX = int(os.getenv("HIST_MAX", "8"))
-HIST_TTL_S = int(os.getenv("HIST_TTL_S", "900"))  # 15 min
+HIST_TTL_S = int(os.getenv("HIST_TTL_S", "900"))
 
-# Tamanho máx que vamos baixar/colar de anexos de texto
 MAX_TEXT_ATTACHMENT_CHARS = int(os.getenv("MAX_TEXT_ATTACHMENT_CHARS", "12000"))
 
 # ================= DISCORD =================
@@ -64,10 +55,8 @@ client = discord.Client(intents=intents)
 
 bot_busy = False
 
-# Históricos por usuário (para quem pinga o bot)
 user_hist: dict[int, list[tuple[float, str]]] = {}
 user_violation: dict[int, dict[str, Any]] = {}
-
 state_lock = asyncio.Lock()
 
 # ================= FILE LOAD =================
@@ -81,11 +70,11 @@ def load_file(path: str) -> str:
 REGRAS_TXT = load_file("regras.txt")
 DADOS_TXT = load_file("dados.txt")
 
-# ================= STATE (PERSISTENTE) =================
+# ================= STATE =================
 DEFAULT_STATE = {
-    "paused": False,              # se True: responde só admins
-    "ignored_user_ids": {},       # { "123": {"until": 0 or epoch} }
-    "directives": []              # lista de strings curtas (ordens)
+    "paused": False,
+    "ignored_user_ids": {},
+    "directives": []
 }
 
 def load_state_sync() -> dict:
@@ -118,10 +107,6 @@ def trim_directives_to_200_words(directives: list[str]) -> list[str]:
 
 # ================= AUTH IDS =================
 def extract_authorized_ids_from_regras(regras: str) -> set[int]:
-    """
-    Pega IDs (17-20 dígitos) em linhas que mencionem dono/mod/equipe/autoriz.
-    BUG corrigido: keywords precisam estar em minúsculo, porque a linha foi lowercased.
-    """
     ids: set[int] = set()
     keywords = ["fundador", "criador", "programador", "administrador", "equipe", "autoriz", "admin", "dono", "owner", "dev"]
     for line in (regras or "").splitlines():
@@ -146,12 +131,6 @@ def is_authorized(user: discord.abc.User) -> bool:
     return int(user.id) in AUTHORIZED_IDS
 
 def is_controller(member: discord.Member) -> bool:
-    """
-    Quem o bot deve obedecer:
-    - está na lista (regras.txt / env)
-    - ou tem permissão admin
-    - ou tem cargo acima do bot (hierarquia)
-    """
     try:
         if is_authorized(member):
             return True
@@ -169,9 +148,6 @@ def typing_delay(text: str) -> float:
     return 0.8 + min(len(text) * 0.02, 3.0)
 
 async def reply_soft(message: discord.Message, text: str):
-    """
-    Responde sem 'Erro interno'. Se falhar por permissão/HTTP, só ignora.
-    """
     if not text:
         return
     try:
@@ -273,28 +249,6 @@ def bump_violation(uid: int, vtype: str) -> int:
     d["last_ts"] = now
     return int(d["count"])
 
-def parse_duration_seconds(text: str) -> Optional[int]:
-    """
-    Aceita coisas tipo: "60s", "5 min", "10m", "2h", "1 dia", "1d".
-    """
-    if not text:
-        return None
-    low = text.lower()
-    m = re.search(r"\b(\d{1,5})\s*(s|seg|segs|sec|secs|m|min|mins|h|hr|hrs|hora|horas|d|dia|dias)\b", low)
-    if not m:
-        return None
-    n = int(m.group(1))
-    u = m.group(2)
-    if u.startswith(("s", "seg", "sec")):
-        return n
-    if u.startswith(("m", "min")):
-        return n * 60
-    if u.startswith(("h", "hr", "hora")):
-        return n * 3600
-    if u.startswith(("d", "dia")):
-        return n * 86400
-    return None
-
 def is_image_attachment(att: discord.Attachment) -> bool:
     ct = (att.content_type or "").lower()
     fn = (att.filename or "").lower()
@@ -311,7 +265,7 @@ def is_text_attachment(att: discord.Attachment) -> bool:
 
 async def fetch_text_attachment(att: discord.Attachment) -> str:
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
             async with session.get(att.url) as r:
                 if r.status != 200:
                     return ""
@@ -325,10 +279,6 @@ async def fetch_text_attachment(att: discord.Attachment) -> str:
 
 # ================= OPENROUTER =================
 def get_model_payload_fields(default_model: Optional[str] = None) -> dict:
-    """
-    Se default_model vier setado, usa ele (sem fallback).
-    Se não, usa OPENROUTER_MODELS (fallback) ou OPENROUTER_MODEL.
-    """
     if default_model:
         return {"model": default_model}
     if OPENROUTER_MODELS:
@@ -343,10 +293,8 @@ async def call_openrouter(
     end_user_id: Optional[str] = None,
     model_override: Optional[str] = None,
     force_json: bool = True,
+    timeout_s: Optional[int] = None,
 ) -> str:
-    """
-    user_content pode ser string ou lista de "parts" (multimodal).
-    """
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -361,17 +309,14 @@ async def call_openrouter(
             {"role": "user", "content": user_content},
         ],
         "max_tokens": MAX_TOKENS,
+        "temperature": TEMPERATURE,
     }
-
-    # Alguns modelos/providers podem rejeitar temperature/response_format -> fallback automático.
-    payload["temperature"] = TEMPERATURE
     if force_json:
         payload["response_format"] = {"type": "json_object"}
-
     if end_user_id:
         payload["user"] = str(end_user_id)
 
-    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_S)
+    timeout = aiohttp.ClientTimeout(total=int(timeout_s or REQUEST_TIMEOUT_S))
 
     async def _post(p: dict[str, Any]) -> dict:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -380,22 +325,22 @@ async def call_openrouter(
 
     data = await _post(payload)
 
+    # fallback: se provider rejeitar response_format/temperature, tenta de novo sem eles
     if isinstance(data, dict) and "error" in data:
         msg = data["error"].get("message") if isinstance(data["error"], dict) else str(data["error"])
         lowered = (msg or "").lower()
 
-        retry = False
         payload2 = dict(payload)
-
-        if "temperature" in lowered or "top_p" in lowered or "sampling" in lowered:
-            payload2.pop("temperature", None)
-            retry = True
+        retried = False
 
         if "response_format" in lowered or "structured" in lowered:
             payload2.pop("response_format", None)
-            retry = True
+            retried = True
+        if "temperature" in lowered or "sampling" in lowered:
+            payload2.pop("temperature", None)
+            retried = True
 
-        if retry:
+        if retried:
             data = await _post(payload2)
 
     if isinstance(data, dict) and "error" in data:
@@ -404,7 +349,7 @@ async def call_openrouter(
 
     return data["choices"][0]["message"]["content"]
 
-# ================= PROMPT =================
+# ================= PROMPTS =================
 def build_system_prompt(admin_mode: bool, active_directives: list[str]) -> str:
     directives_block = "\n".join(f"- {x}" for x in active_directives) if active_directives else "(nenhuma)"
     admin_extra = """
@@ -415,7 +360,7 @@ ADMIN MODE (só para controladores):
 """ if admin_mode else ""
 
     return f"""
-Você é {BOT_NAME}. Direto e firme, mas sem atacar pessoas.
+Você é {BOT_NAME}. Direto e firme.
 
 ESTILO:
 - Respostas curtas, frias e objetivas, mantenha o máximo de respeito com seus superiores e subalternos; para militares bisonhos que façam perguntas IDIOTAS é permitido utilizar-se de pressão psicológica séria pesada, com grosseria como "Cala boca, Verme." ou "Silêncio, Animal."
@@ -452,9 +397,8 @@ JSON DE SAÍDA (somente um objeto):
 REGRAS:
 - Responda SOMENTE com JSON válido. Sem markdown.
 - "reply" não pode ter perguntas nem "?".
-- "timeout_seconds" use 60, 300 (5 min), 3600 (1h) ou 86400 (1 dia) quando fizer sentido.
-- "punish_target": default é "offender". Só use "reporter" quando o reportante estiver tentando difamar ou spammar.
-- "admin" só preencha se admin_mode estiver ativo e houver ordem válida.
+- "timeout_seconds" use 60, 300, 3600 ou 86400 quando fizer sentido.
+- "punish_target": default "offender". Use "reporter" só se o reportante estiver difamando/spammando.
 
 ══════════ REGRAS ABSOLUTAS ══════════
 {REGRAS_TXT}
@@ -468,27 +412,20 @@ ORDENS ATIVAS DA MODERAÇÃO (memória):
 {admin_extra}
 """.strip()
 
-def build_admin_command_prompt() -> str:
+def build_vision_system_prompt() -> str:
     return f"""
-Você é um interpretador de comandos ADMIN para um bot Discord.
-
-Retorne APENAS JSON:
-{{
-  "op": "none" | "pause" | "resume" | "timeout" | "kick" | "ban" | "ignore" | "unignore" | "add_role" | "remove_role" | "add_directive" | "clear_directives",
-  "targets": [string],
-  "timeout_seconds": number | null,
-  "role_ids": [string],
-  "directive": string | null
-}}
+Você descreve imagens de forma objetiva e curta.
 
 Regras:
-- Use IDs recebidos na lista de "mentioned_users" e "mentioned_roles".
-- Se não tiver alvo explícito, mas existir "reply_target_user_id", use ele.
-- Se não houver comando, op="none".
-- Não use markdown.
+- NÃO use JSON.
+- NÃO faça perguntas.
+- Se parecer montagem/edição/print falso, diga "PARECE EDITADA" ou "NÃO PARECE EDITADA".
+- Se a imagem for irrelevante, diga o que aparece mesmo assim.
+
+Saída: 3-8 linhas no máximo.
 """.strip()
 
-# ================= ADMIN COMMANDS (LOCAL + LLM FALLBACK) =================
+# ================= ACTION HELPERS =================
 async def apply_timeout(member: discord.Member, seconds: int) -> bool:
     try:
         seconds = min(max(60, int(seconds)), 86400)
@@ -497,317 +434,8 @@ async def apply_timeout(member: discord.Member, seconds: int) -> bool:
     except (discord.Forbidden, discord.HTTPException):
         return False
 
-async def apply_kick(guild: discord.Guild, user: discord.Member, reason: str = "") -> bool:
-    try:
-        await guild.kick(user, reason=reason or None)
-        return True
-    except (discord.Forbidden, discord.HTTPException):
-        return False
-
-async def apply_ban(guild: discord.Guild, user: discord.Member, reason: str = "") -> bool:
-    try:
-        await guild.ban(user, reason=reason or None, delete_message_days=0)
-        return True
-    except (discord.Forbidden, discord.HTTPException):
-        return False
-
-async def apply_roles(member: discord.Member, role_ids: list[str], add: bool) -> bool:
-    try:
-        roles = []
-        for rid in role_ids:
-            if rid.isdigit():
-                r = member.guild.get_role(int(rid))
-                if r:
-                    roles.append(r)
-        if not roles:
-            return False
-        if add:
-            await member.add_roles(*roles, reason="Admin command")
-        else:
-            await member.remove_roles(*roles, reason="Admin command")
-        return True
-    except (discord.Forbidden, discord.HTTPException):
-        return False
-
-def pick_target_ids(
-    mentioned_users: list[discord.abc.User],
-    reply_target_user_id: Optional[int]
-) -> list[str]:
-    ids = [str(u.id) for u in mentioned_users if u and not getattr(u, "bot", False)]
-    if not ids and reply_target_user_id:
-        ids = [str(reply_target_user_id)]
-    return ids
-
-async def handle_admin_command(
-    message: discord.Message,
-    controller: discord.Member,
-    reply_target_user_id: Optional[int],
-) -> bool:
-    """
-    Retorna True se executou algum comando admin e encerrou o fluxo.
-    Comandos "naturais" mais comuns (sem depender do modelo).
-    """
-    if not message.guild:
-        return False
-
-    content_raw = message.content or ""
-    content = content_raw.replace(f"<@{client.user.id}>", "").strip()
-    low = content.lower()
-
-    mentioned_users = [u for u in message.mentions if u.id != client.user.id]
-    target_ids = pick_target_ids(mentioned_users, reply_target_user_id)
-
-    # Pausar / retomar
-    if any(k in low for k in ["pausa", "pause", "pausar bot", "silencia bot"]):
-        async with state_lock:
-            st = load_state_sync()
-            st["paused"] = True
-            save_state_sync(st)
-        await reply_soft(message, "...")
-        return True
-
-    if any(k in low for k in ["retoma", "resume", "despausa", "volta"]):
-        async with state_lock:
-            st = load_state_sync()
-            st["paused"] = False
-            save_state_sync(st)
-        await reply_soft(message, "...")
-        return True
-
-    # Ignorar / des-ignorar
-    if any(k in low for k in ["ignora", "não responde", "nao responde", "mute chat"]):
-        if target_ids:
-            async with state_lock:
-                st = load_state_sync()
-                for uid in target_ids:
-                    st.setdefault("ignored_user_ids", {})[uid] = {"until": 0}
-                save_state_sync(st)
-            await reply_soft(message, "...")
-            return True
-
-    if any(k in low for k in ["designora", "unignore", "volta a responder", "responde de novo"]):
-        if target_ids:
-            async with state_lock:
-                st = load_state_sync()
-                for uid in target_ids:
-                    st.get("ignored_user_ids", {}).pop(uid, None)
-                save_state_sync(st)
-            await reply_soft(message, "...")
-            return True
-
-    # Timeout/mute
-    if any(k in low for k in ["muta", "mute", "timeout", "silencia", "castiga"]):
-        secs = parse_duration_seconds(low) or 300
-        ok_any = False
-        for uid in target_ids:
-            mem = message.guild.get_member(int(uid)) if uid.isdigit() else None
-            if mem:
-                ok_any |= await apply_timeout(mem, secs)
-        await reply_soft(message, "...")
-        return True
-
-    # Kick
-    if any(k in low for k in ["expulsa", "kick", "chuta"]):
-        for uid in target_ids:
-            mem = message.guild.get_member(int(uid)) if uid.isdigit() else None
-            if mem:
-                await apply_kick(message.guild, mem, reason="Admin command")
-        await reply_soft(message, "...")
-        return True
-
-    # Ban
-    if any(k in low for k in ["ban", "bane", "banir"]):
-        for uid in target_ids:
-            mem = message.guild.get_member(int(uid)) if uid.isdigit() else None
-            if mem:
-                await apply_ban(message.guild, mem, reason="Admin command")
-        await reply_soft(message, "...")
-        return True
-
-    # Roles (usa role mentions por id)
-    role_ids = [str(r.id) for r in getattr(message, "role_mentions", [])]
-    if role_ids and any(k in low for k in ["dar cargo", "add cargo", "adiciona cargo", "promove", "seta cargo", "dá cargo"]):
-        for uid in target_ids:
-            mem = message.guild.get_member(int(uid)) if uid.isdigit() else None
-            if mem:
-                await apply_roles(mem, role_ids, add=True)
-        await reply_soft(message, "...")
-        return True
-
-    if role_ids and any(k in low for k in ["tirar cargo", "remove cargo", "remover cargo", "rebaixa"]):
-        for uid in target_ids:
-            mem = message.guild.get_member(int(uid)) if uid.isdigit() else None
-            if mem:
-                await apply_roles(mem, role_ids, add=False)
-        await reply_soft(message, "...")
-        return True
-
-    # Diretivas (memória)
-    if any(k in low for k in ["memoriza:", "ordem:", "diretiva:"]):
-        parts = content.split(":", 1)
-        directive = parts[1].strip() if len(parts) > 1 else ""
-        if directive:
-            async with state_lock:
-                st = load_state_sync()
-                st.setdefault("directives", []).append(directive)
-                st["directives"] = trim_directives_to_200_words(st["directives"])
-                save_state_sync(st)
-            await reply_soft(message, "...")
-            return True
-
-    if any(k in low for k in ["limpa diretivas", "remove diretivas", "zera diretivas"]):
-        async with state_lock:
-            st = load_state_sync()
-            st["directives"] = []
-            save_state_sync(st)
-        await reply_soft(message, "...")
-        return True
-
-    return False
-
-async def handle_admin_command_with_model(
-    message: discord.Message,
-    controller: discord.Member,
-    reply_target_user_id: Optional[int],
-) -> bool:
-    if not message.guild:
-        return False
-
-    content = (message.content or "").replace(f"<@{client.user.id}>", "").strip()
-    mentioned_users = [u for u in message.mentions if u.id != client.user.id]
-    mentioned_roles = getattr(message, "role_mentions", [])
-
-    prompt = build_admin_command_prompt()
-    user = {
-        "text": content,
-        "reply_target_user_id": str(reply_target_user_id) if reply_target_user_id else None,
-        "mentioned_users": [{"id": str(u.id), "name": str(u)} for u in mentioned_users],
-        "mentioned_roles": [{"id": str(r.id), "name": r.name} for r in mentioned_roles],
-    }
-
-    try:
-        raw = await call_openrouter(
-            prompt,
-            json.dumps(user, ensure_ascii=False),
-            end_user_id=str(controller.id),
-            model_override=COMMAND_MODEL,
-            force_json=True
-        )
-        js = extract_json_object(raw)
-        if not js:
-            return False
-        d = json.loads(js)
-    except Exception:
-        return False
-
-    op = (d.get("op") or "none").strip().lower()
-    targets = d.get("targets") or []
-    role_ids = d.get("role_ids") or []
-    secs = d.get("timeout_seconds", None)
-    directive = d.get("directive", None)
-
-    if not isinstance(targets, list):
-        targets = []
-    if not isinstance(role_ids, list):
-        role_ids = []
-
-    if op == "none":
-        return False
-
-    if op == "pause":
-        async with state_lock:
-            st = load_state_sync()
-            st["paused"] = True
-            save_state_sync(st)
-        await reply_soft(message, "...")
-        return True
-
-    if op == "resume":
-        async with state_lock:
-            st = load_state_sync()
-            st["paused"] = False
-            save_state_sync(st)
-        await reply_soft(message, "...")
-        return True
-
-    if op in ["ignore", "unignore"]:
-        async with state_lock:
-            st = load_state_sync()
-            if op == "ignore":
-                for uid in targets:
-                    if isinstance(uid, str) and uid.isdigit():
-                        st.setdefault("ignored_user_ids", {})[uid] = {"until": 0}
-            else:
-                for uid in targets:
-                    if isinstance(uid, str):
-                        st.get("ignored_user_ids", {}).pop(uid, None)
-            save_state_sync(st)
-        await reply_soft(message, "...")
-        return True
-
-    if op == "add_directive" and isinstance(directive, str) and directive.strip():
-        async with state_lock:
-            st = load_state_sync()
-            st.setdefault("directives", []).append(directive.strip())
-            st["directives"] = trim_directives_to_200_words(st["directives"])
-            save_state_sync(st)
-        await reply_soft(message, "...")
-        return True
-
-    if op == "clear_directives":
-        async with state_lock:
-            st = load_state_sync()
-            st["directives"] = []
-            save_state_sync(st)
-        await reply_soft(message, "...")
-        return True
-
-    ok_any = False
-    if op == "timeout":
-        secs2 = int(secs) if isinstance(secs, (int, float)) else 300
-        for uid in targets:
-            if isinstance(uid, str) and uid.isdigit():
-                mem = message.guild.get_member(int(uid))
-                if mem:
-                    ok_any |= await apply_timeout(mem, secs2)
-
-    if op == "kick":
-        for uid in targets:
-            if isinstance(uid, str) and uid.isdigit():
-                mem = message.guild.get_member(int(uid))
-                if mem:
-                    ok_any |= await apply_kick(message.guild, mem, reason="Admin command")
-
-    if op == "ban":
-        for uid in targets:
-            if isinstance(uid, str) and uid.isdigit():
-                mem = message.guild.get_member(int(uid))
-                if mem:
-                    ok_any |= await apply_ban(message.guild, mem, reason="Admin command")
-
-    if op == "add_role":
-        for uid in targets:
-            if isinstance(uid, str) and uid.isdigit():
-                mem = message.guild.get_member(int(uid))
-                if mem:
-                    ok_any |= await apply_roles(mem, [str(x) for x in role_ids], add=True)
-
-    if op == "remove_role":
-        for uid in targets:
-            if isinstance(uid, str) and uid.isdigit():
-                mem = message.guild.get_member(int(uid))
-                if mem:
-                    ok_any |= await apply_roles(mem, [str(x) for x in role_ids], add=False)
-
-    await reply_soft(message, "...")
-    return True
-
 # ================= MESSAGE TARGETING =================
 async def resolve_reference_message(message: discord.Message) -> Optional[discord.Message]:
-    """
-    Se a pessoa respondeu (reply) em cima de outra mensagem e marcou o bot,
-    pega a mensagem original pra punir o autor correto.
-    """
     try:
         if not message.reference or not message.reference.message_id:
             return None
@@ -816,6 +444,27 @@ async def resolve_reference_message(message: discord.Message) -> Optional[discor
         return await message.channel.fetch_message(message.reference.message_id)
     except Exception:
         return None
+
+# ================= VISION FLOW =================
+async def describe_images_with_vision(image_urls: list[str], context_text: str, end_user_id: str) -> str:
+    """
+    Etapa 1: vision model descreve imagem em texto puro (sem JSON).
+    """
+    parts = [{"type": "text", "text": context_text}]
+
+    # FORMATO MAIS COMPATÍVEL: image_url + image_url:{url}
+    for url in image_urls[:4]:
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+
+    raw = await call_openrouter(
+        build_vision_system_prompt(),
+        parts,
+        end_user_id=end_user_id,
+        model_override=VISION_MODEL,
+        force_json=False,
+        timeout_s=VISION_TIMEOUT_S,
+    )
+    return (raw or "").strip()
 
 # ================= EVENTS =================
 @client.event
@@ -835,14 +484,13 @@ async def on_message(message: discord.Message):
     if client.user not in message.mentions:
         return
 
-    # ocupado = ignora e NÃO chama OpenRouter
     if bot_busy:
         return
 
     if not isinstance(message.author, discord.Member):
         return
 
-    controller = message.author  # quem marcou o bot
+    controller = message.author
     guild = message.guild
     if not guild:
         return
@@ -850,7 +498,7 @@ async def on_message(message: discord.Message):
     controller_text = (message.content or "").replace(f"<@{client.user.id}>", "").strip()
     low = controller_text.lower()
 
-    # comandos simples locais
+    # comandos simples
     if "modelo" in low:
         await reply_soft(message, PUBLIC_MODEL_NAME)
         return
@@ -858,15 +506,12 @@ async def on_message(message: discord.Message):
         await reply_soft(message, f"v{VERSION_MAJOR}.{VERSION_MINOR}")
         return
 
-    # carrega estado
     async with state_lock:
         state = load_state_sync()
 
-    # se pausado, só controladores
     if state.get("paused") and not is_controller(controller):
         return
 
-    # ignore list (para quem marca o bot)
     ignored = state.get("ignored_user_ids", {}).get(str(controller.id))
     if ignored:
         until = ignored.get("until", 0)
@@ -878,33 +523,14 @@ async def on_message(message: discord.Message):
                 st.get("ignored_user_ids", {}).pop(str(controller.id), None)
                 save_state_sync(st)
 
-    # Se for reply em cima de outra msg, o ALVO (offender) é quem escreveu a msg original.
     referenced = await resolve_reference_message(message)
     target_msg = referenced or message
-    offender_user = target_msg.author if isinstance(target_msg.author, discord.Member) else None
-    offender = offender_user if offender_user else controller  # fallback
-
-    reply_target_user_id = None
-    if referenced and isinstance(referenced.author, discord.Member):
-        reply_target_user_id = int(referenced.author.id)
-
-    # ===== Admin commands =====
-    if is_controller(controller):
-        try:
-            did = await handle_admin_command(message, controller, reply_target_user_id)
-            if did:
-                return
-            did2 = await handle_admin_command_with_model(message, controller, reply_target_user_id)
-            if did2:
-                return
-        except Exception:
-            return
+    offender = target_msg.author if isinstance(target_msg.author, discord.Member) else controller
 
     bot_busy = True
     try:
-        # ===== Gramática: permitido só no chat-geral =====
-        # Aplica só quando a própria pessoa está falando com o bot (não quando está reportando alguém via reply).
-        if (referenced is None) and message.channel.id != CHAT_GERAL_ID and absence_grammar(controller_text):
+        # Gramática (só quando a pessoa está falando com o bot diretamente, não reportando via reply)
+        if referenced is None and message.channel.id != CHAT_GERAL_ID and absence_grammar(controller_text):
             async with message.channel.typing():
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
             ok = await apply_timeout(controller, 60)
@@ -913,9 +539,8 @@ async def on_message(message: discord.Message):
                 await punishment_report(message.channel, controller, "Ausência gramatical", 60)
             return
 
-        # ===== Spam local (sem LLM) para quem pinga =====
+        # Spam local do controlador (quem pinga o bot)
         update_history(controller.id, controller_text)
-
         if detect_exact_repeat_spam(controller.id):
             async with message.channel.typing():
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
@@ -934,7 +559,7 @@ async def on_message(message: discord.Message):
                 await punishment_report(message.channel, controller, "Spam de símbolos", 60)
             return
 
-        # ===== Diretivas ativas (memória) =====
+        # diretivas
         async with state_lock:
             st = load_state_sync()
             directives = trim_directives_to_200_words(st.get("directives", []))
@@ -942,14 +567,10 @@ async def on_message(message: discord.Message):
             save_state_sync(st)
 
         admin_mode = is_controller(controller)
+        system_prompt = build_system_prompt(admin_mode, directives)
 
-        # ===== Contexto para o modelo =====
-        roles = roles_for_prompt(controller)
-        roles_str = ", ".join(roles) if roles else "(sem cargos)"
-        top_roles = ", ".join(roles[:5]) if roles else "(sem cargos)"
-
-        # anexos: pega do target_msg (mensagem reportada) + do controller msg
-        attachments = []
+        # anexos: pega do alvo (mensagem reportada) + do controlador (se ele anexou)
+        attachments: list[discord.Attachment] = []
         try:
             attachments.extend(list(getattr(target_msg, "attachments", [])))
         except Exception:
@@ -962,6 +583,7 @@ async def on_message(message: discord.Message):
 
         image_urls: list[str] = []
         text_blobs: list[str] = []
+
         for att in attachments:
             if is_image_attachment(att):
                 image_urls.append(att.url)
@@ -970,61 +592,69 @@ async def on_message(message: discord.Message):
                 if blob:
                     text_blobs.append(f"Arquivo {att.filename}:\n{blob}")
 
+        roles = roles_for_prompt(controller)
+        roles_str = ", ".join(roles) if roles else "(sem cargos)"
+        top_roles = ", ".join(roles[:5]) if roles else "(sem cargos)"
+
         offense_text = (target_msg.content or "").strip()
         reporter_text = controller_text
 
-        mentioned_users = [u for u in message.mentions if u.id != client.user.id]
-        mentioned_map = [{"id": str(u.id), "name": str(u)} for u in mentioned_users]
-
-        system_prompt = build_system_prompt(admin_mode=admin_mode, active_directives=directives)
-
-        base_text = (
+        base_context = (
             f"CONTROLADOR: {controller.display_name} (id {controller.id})\n"
             f"CONTROLADOR cargos: {top_roles}\n"
-            f"CONTROLADOR todos cargos: {roles_str}\n"
-            f"Mencionados pelo controlador: {json.dumps(mentioned_map, ensure_ascii=False)}\n\n"
-            f"ALVO (possível infrator): {getattr(offender, 'display_name', str(offender))} (id {offender.id})\n"
+            f"CONTROLADOR todos cargos: {roles_str}\n\n"
+            f"ALVO (possível infrator): {offender.display_name} (id {offender.id})\n"
             f"MENSAGEM DO ALVO:\n{offense_text}\n\n"
-            f"COMENTÁRIO DO CONTROLADOR (se houver):\n{reporter_text}\n"
+            f"COMENTÁRIO DO CONTROLADOR:\n{reporter_text}\n"
         )
 
         if text_blobs:
-            base_text += "\n\nANEXOS DE TEXTO:\n" + "\n\n".join(text_blobs)
+            base_context += "\n\nANEXOS DE TEXTO:\n" + "\n\n".join(text_blobs)
 
-        user_content: Any
-        chosen_model: Optional[str] = None
-
+        # ===== ETAPA 1 (IMAGEM): descrição em texto puro =====
+        image_description = ""
         if image_urls:
-            parts = [{"type": "text", "text": base_text}]
-            for url in image_urls[:4]:
-                parts.append({"type": "image_url", "imageUrl": {"url": url}})
-            user_content = parts
-            chosen_model = VISION_MODEL
-        elif text_blobs:
-            user_content = base_text
-            chosen_model = ATTACHMENT_TEXT_MODEL
-        else:
-            user_content = base_text
-            chosen_model = None
+            async with message.channel.typing():
+                await asyncio.sleep(EXTRA_TYPING_SECONDS)
+                try:
+                    image_description = await describe_images_with_vision(
+                        image_urls=image_urls,
+                        context_text=base_context,
+                        end_user_id=str(controller.id),
+                    )
+                except Exception:
+                    # se visão falhar, segue sem imagem (mas não fica mudo)
+                    image_description = ""
+
+        # ===== ETAPA 2: decisão final (sempre em JSON) =====
+        final_user_prompt = base_context
+        if image_description:
+            final_user_prompt += "\n\nDESCRIÇÃO DA IMAGEM (vision):\n" + image_description
+
+        chosen_model = ATTACHMENT_TEXT_MODEL if text_blobs else None
 
         async with message.channel.typing():
             await asyncio.sleep(EXTRA_TYPING_SECONDS)
             raw = await call_openrouter(
                 system_prompt,
-                user_content,
+                final_user_prompt,
                 end_user_id=str(controller.id),
                 model_override=chosen_model,
-                force_json=True
+                force_json=True,
+                timeout_s=REQUEST_TIMEOUT_S,
             )
 
-            js = extract_json_object(raw)
-            if not js:
-                return
+        js = extract_json_object(raw)
+        if not js:
+            # Antes ele ficava mudo — agora responde algo mínimo
+            await reply_soft(message, "...")
+            return
 
-            try:
-                d = json.loads(js)
-            except Exception:
-                return
+        try:
+            d = json.loads(js)
+        except Exception:
+            await reply_soft(message, "...")
+            return
 
         action = (d.get("action") or "reply").strip().lower()
         punish_target = (d.get("punish_target") or "offender").strip().lower()
@@ -1037,7 +667,7 @@ async def on_message(message: discord.Message):
         if punish_target == "reporter":
             punish_member = controller
         elif punish_target == "offender":
-            punish_member = offender if isinstance(offender, discord.Member) else None
+            punish_member = offender
         else:
             punish_member = None
 
@@ -1054,53 +684,12 @@ async def on_message(message: discord.Message):
                 seconds = max(seconds, 60)
                 reason = reason or "Ofensa"
 
-        # Admin (estado) ainda pode ser atualizado via modelo
-        if admin_mode and isinstance(d.get("admin"), dict):
-            adm = d["admin"]
-            changed = False
-            async with state_lock:
-                st = load_state_sync()
-
-                sp = adm.get("set_paused", None)
-                if sp is True:
-                    st["paused"] = True
-                    changed = True
-                elif sp is False:
-                    st["paused"] = False
-                    changed = True
-
-                ig = adm.get("ignore_user_ids") or []
-                if isinstance(ig, list):
-                    for uid in ig:
-                        if isinstance(uid, str) and uid.isdigit():
-                            st.setdefault("ignored_user_ids", {})[uid] = {"until": 0}
-                            changed = True
-
-                un = adm.get("unignore_user_ids") or []
-                if isinstance(un, list):
-                    for uid in un:
-                        if isinstance(uid, str):
-                            st.get("ignored_user_ids", {}).pop(uid, None)
-                            changed = True
-
-                add_dir = adm.get("add_directive", None)
-                if isinstance(add_dir, str) and add_dir.strip():
-                    st.setdefault("directives", []).append(add_dir.strip())
-                    st["directives"] = trim_directives_to_200_words(st["directives"])
-                    changed = True
-
-                if adm.get("remove_all_directives") is True:
-                    st["directives"] = []
-                    changed = True
-
-                if changed:
-                    save_state_sync(st)
-
         if action == "ignore":
             return
 
         if action == "timeout":
             if not punish_member:
+                await reply_soft(message, "...")
                 return
 
             if seconds <= 0:
@@ -1126,10 +715,7 @@ async def on_message(message: discord.Message):
 
     except Exception as e:
         print("ERRO:", repr(e))
-        try:
-            await reply_soft(message, "...")
-        except Exception:
-            pass
+        await reply_soft(message, "...")
     finally:
         bot_busy = False
 
