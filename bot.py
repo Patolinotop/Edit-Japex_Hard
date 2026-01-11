@@ -14,31 +14,32 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# ===== Provider selection (default: Hugging Face Router) =====
+# ===== Provider selection (default: Hugging Face) =====
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "hf").strip().lower()  # "hf" or "openrouter"
 
-# Hugging Face Router (OpenAI-compatible)
+# Hugging Face
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 HF_CHAT_URL = os.getenv("HF_CHAT_URL", "https://router.huggingface.co/v1/chat/completions").strip()
 HF_COMPLETIONS_URL = os.getenv("HF_COMPLETIONS_URL", "https://router.huggingface.co/v1/completions").strip()
+HF_INFERENCE_URL_TMPL = os.getenv("HF_INFERENCE_URL_TMPL", "https://api-inference.huggingface.co/models/{model}").strip()
 
 HF_MODEL = (os.getenv("HF_MODEL") or os.getenv("MODEL") or "meta-llama/Meta-Llama-3-8B-Instruct").strip()
 HF_MODELS = os.getenv("HF_MODELS", "").strip()  # "modelA,modelB,..."
 
-# OpenRouter (optional)
+VISION_MODEL = os.getenv("VISION_MODEL", "").strip()  # opcional (apenas se seu modelo suportar imagem no chat)
+ATTACHMENT_TEXT_MODEL = os.getenv("ATTACHMENT_TEXT_MODEL", "").strip()
+
+# OpenRouter (optional fallback if you want)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_URL = os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b").strip()
 OPENROUTER_MODELS = os.getenv("OPENROUTER_MODELS", "").strip()
 
-# Aux
-ATTACHMENT_TEXT_MODEL = os.getenv("ATTACHMENT_TEXT_MODEL", "").strip()
-
 BOT_NAME = "Edit_Japex"
 PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 VERSION_MAJOR = 2
-VERSION_MINOR = 3
+VERSION_MINOR = 2
 
 CHAT_GERAL_ID = int(os.getenv("CHAT_GERAL_ID", "1450594073596395548"))
 
@@ -46,6 +47,7 @@ MAX_TOKENS = int(os.getenv("MAX_TOKENS", "320"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.55"))
 
 REQUEST_TIMEOUT_S = int(os.getenv("REQUEST_TIMEOUT_S", "45"))
+VISION_TIMEOUT_S = int(os.getenv("VISION_TIMEOUT_S", "75"))
 EXTRA_TYPING_SECONDS = float(os.getenv("EXTRA_TYPING_SECONDS", "1.5"))
 
 AUTHORIZED_IDS_ENV = os.getenv("AUTHORIZED_IDS", "").strip()
@@ -55,8 +57,6 @@ HIST_MAX = int(os.getenv("HIST_MAX", "8"))
 HIST_TTL_S = int(os.getenv("HIST_TTL_S", "900"))
 
 MAX_TEXT_ATTACHMENT_CHARS = int(os.getenv("MAX_TEXT_ATTACHMENT_CHARS", "12000"))
-
-DEFAULT_TIMEOUT_SECONDS = int(os.getenv("DEFAULT_TIMEOUT_SECONDS", "300"))  # 5 min default
 
 # ================= DISCORD =================
 intents = discord.Intents.default()
@@ -86,8 +86,7 @@ DADOS_TXT = load_file("dados.txt")
 DEFAULT_STATE = {
     "paused": False,
     "ignored_user_ids": {},
-    "directives": [],
-    "saved_roles": {}  # user_id -> [role_id, ...]
+    "directives": []
 }
 
 def load_state_sync() -> dict:
@@ -201,15 +200,6 @@ async def punishment_report(channel, member: discord.Member, reason: str, second
         f"Duração: {minutes} minuto(s)"
     )
 
-async def safe_delete_message(msg: Optional[discord.Message]) -> bool:
-    if not msg:
-        return False
-    try:
-        await msg.delete()
-        return True
-    except Exception:
-        return False
-
 def absence_grammar(text: str) -> bool:
     t = (text or "").strip()
     if len(t) < 3:
@@ -274,39 +264,41 @@ def detect_emoji_spam(content: str) -> bool:
         return True
     return False
 
+def bump_violation(uid: int, vtype: str) -> int:
+    now = time.time()
+    d = user_violation.get(uid)
+    if not d or (now - d.get("last_ts", 0) > HIST_TTL_S) or d.get("type") != vtype:
+        user_violation[uid] = {"type": vtype, "count": 1, "last_ts": now}
+        return 1
+    d["count"] += 1
+    d["last_ts"] = now
+    return int(d["count"])
+
 def parse_duration_seconds(text: str) -> Optional[int]:
-    """
-    Aceita:
-    - 10s / 10 seg / 10 segundos
-    - 5m / 5 min / 5 mins / 5 minutos
-    - 1h / 1 hr / 1 hora / 2 horas
-    - 1d / 1 dia / 2 dias
-    """
     if not text:
         return None
-    low = text.lower().strip()
-
-    # aceita "1h", "10min", "30s"
-    m = re.search(
-        r"\b(\d{1,5})\s*(s|seg|segs|sec|secs|segundo|segundos|m|min|mins|minuto|minutos|h|hr|hrs|hora|horas|d|dia|dias)\b",
-        low
-    )
+    low = text.lower()
+    m = re.search(r"\b(\d{1,5})\s*(s|seg|segs|sec|secs|m|min|mins|h|hr|hrs|hora|horas|d|dia|dias)\b", low)
     if not m:
         return None
-
     n = int(m.group(1))
     u = m.group(2)
-
-    if u.startswith(("s", "seg", "sec", "segundo")):
+    if u.startswith(("s", "seg", "sec")):
         return n
-    if u.startswith(("m", "min", "minuto")):
+    if u.startswith(("m", "min")):
         return n * 60
     if u.startswith(("h", "hr", "hora")):
         return n * 3600
     if u.startswith(("d", "dia")):
         return n * 86400
-
     return None
+
+def is_image_attachment(att: discord.Attachment) -> bool:
+    ct = (att.content_type or "").lower()
+    fn = (att.filename or "").lower()
+    if ct.startswith("image/"):
+        return True
+    return any(fn.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"])
 
 def is_text_attachment(att: discord.Attachment) -> bool:
     ct = (att.content_type or "").lower()
@@ -340,11 +332,20 @@ def get_candidate_models(default_model: str, models_csv: str, model_override: Op
     return [default_model]
 
 def flatten_messages_to_prompt(messages: list[dict[str, Any]]) -> str:
+    # conservative prompt builder (works for completions/text-generation)
     parts: list[str] = []
     for m in messages:
         role = (m.get("role") or "").upper()
         content = m.get("content")
-        content_str = str(content or "")
+        if isinstance(content, list):
+            # multimodal list -> keep only text chunks
+            txts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    txts.append(str(item.get("text") or ""))
+            content_str = "\n".join([t for t in txts if t])
+        else:
+            content_str = str(content or "")
         parts.append(f"{role}:\n{content_str}\n")
     parts.append("ASSISTANT:\n")
     return "\n".join(parts).strip()
@@ -384,6 +385,7 @@ async def hf_call_chat(messages: list[dict[str, Any]], model: str, response_form
             return data["choices"][0]["message"]["content"]
 
 async def hf_call_completions(prompt: str, model: str, timeout_s: int) -> str:
+    # OpenAI-style /v1/completions fallback
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN não configurado.")
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
@@ -400,8 +402,38 @@ async def hf_call_completions(prompt: str, model: str, timeout_s: int) -> str:
             data = await r.json(content_type=None)
             if r.status >= 400:
                 raise RuntimeError(f"HF completions error (HTTP {r.status}): {data}")
+            # OpenAI completions typically: choices[0].text
             ch0 = (data.get("choices") or [{}])[0]
-            return (ch0.get("text") or "").strip()
+            return (ch0.get("text") or ch0.get("message", {}).get("content") or "").strip()
+
+async def hf_call_inference_api(prompt: str, model: str, timeout_s: int) -> str:
+    # Native HF Inference API fallback
+    if not HF_TOKEN:
+        raise RuntimeError("HF_TOKEN não configurado.")
+    url = HF_INFERENCE_URL_TMPL.format(model=model)
+    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+    payload: dict[str, Any] = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": MAX_TOKENS,
+            "temperature": TEMPERATURE,
+            "return_full_text": False,
+        },
+        "options": {"wait_for_model": True},
+    }
+
+    timeout = aiohttp.ClientTimeout(total=int(timeout_s))
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, headers=headers, json=payload) as r:
+            data = await r.json(content_type=None)
+            if r.status >= 400:
+                raise RuntimeError(f"HF inference error (HTTP {r.status}): {data}")
+            # For text-generation task: often returns list[{"generated_text": "..."}]
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                return str(data[0].get("generated_text") or "").strip()
+            if isinstance(data, dict) and "generated_text" in data:
+                return str(data["generated_text"]).strip()
+            return str(data).strip()
 
 async def openrouter_call_chat(messages: list[dict[str, Any]], model: str, response_format: Optional[dict[str, Any]], end_user_id: Optional[str], timeout_s: int) -> str:
     if not OPENROUTER_API_KEY:
@@ -450,25 +482,43 @@ async def llm_generate(
         for m in get_candidate_models(OPENROUTER_MODEL, OPENROUTER_MODELS, model_override):
             return await openrouter_call_chat(messages, m, response_format, end_user_id, timeout_s)
 
-    # default HF: chat -> if not chat, try completions
+    # default: HF with adaptive fallbacks
     last_err: Optional[Exception] = None
     for m in get_candidate_models(HF_MODEL, HF_MODELS, model_override):
+        # 1) Try chat
         try:
             return await hf_call_chat(messages, m, response_format, end_user_id, timeout_s)
         except Exception as e:
             last_err = e
             msg = str(e).lower()
-            if "not a chat model" in msg:
-                # try completions fallback
+
+            # If not chat model -> try completions/inference
+            is_not_chat = ("not a chat model" in msg) or ("chat" in msg and "not" in msg and "model" in msg)
+            if not is_not_chat:
+                # small retry once
+                await asyncio.sleep(0.8)
                 try:
-                    prompt = flatten_messages_to_prompt(messages)
-                    return await hf_call_completions(prompt, m, timeout_s)
+                    return await hf_call_chat(messages, m, response_format, end_user_id, timeout_s)
                 except Exception as e2:
                     last_err = e2
-                    continue
-            continue
 
-    raise RuntimeError(f"Falha ao chamar modelo em todos os métodos (router). Último erro: {last_err!r}")
+        # 2) Try completions
+        try:
+            prompt = flatten_messages_to_prompt(messages)
+            out = await hf_call_completions(prompt, m, timeout_s)
+            return out
+        except Exception as e:
+            last_err = e
+
+        # 3) Try native inference API
+        try:
+            prompt = flatten_messages_to_prompt(messages)
+            out = await hf_call_inference_api(prompt, m, timeout_s)
+            return out
+        except Exception as e:
+            last_err = e
+
+    raise RuntimeError(f"Falha ao chamar modelo em todos os métodos. Último erro: {last_err!r}")
 
 # ================= PROMPTS =================
 def build_system_prompt(admin_mode: bool, active_directives: list[str]) -> str:
@@ -478,20 +528,17 @@ def build_system_prompt(admin_mode: bool, active_directives: list[str]) -> str:
 Você é {BOT_NAME}. Moderador firme, objetivo e profissional.
 
 ESTILO:
-- Respostas curtas, frias e objetivas, mantenha o máximo de respeito com seus superiores e subalternos; para militares bisonhos que façam perguntas IDIOTAS é permitido utilizar-se de pressão psicológica séria pesada, com grosseria como "Cala boca, Verme." ou "Silêncio, Animal."
+- Respostas curtas, diretas e sem rodeios.
 - Não faça perguntas. Não puxe assunto.
-- Não utilize palavrões, respeito e conduta maximos, a não ser que o militar cometa algum delito, assim sendo permitido xingamentos e pressão psicologica direcionada ao usuario.
+- Não use humilhação.
 
 MODERAÇÃO (decida pelo conteúdo do ALVO):
-- Se for conversa normal/pergunta: responda curto, tenha opiniões pessoais e politicas.
-- Se for xingamento direcionado ou palavrão para alguém: timeout curto.
-- Se for ameaça séria/velada: timeout mais alto.
-- Se for calúnia/difamação séria (acusação forte sem prova): timeout curto e motivo "Calúnia".
-- Discurso de ódio: mande parar e aplique punição apenas se insistir.
-- Spam: repetição idêntica / flood -> timeout 5 min.
-- Se houver IMAGEM: descreva o que aparece e avalie se a imagem parece editada. Se for claramente montagem usada pra acusar alguém, trate como "defamation" e sugira punir o REPORTER (punish_target="reporter").
-- Se alguém cometer algum delito, permissão total para utilizar de pressão psicológica extrema, direcionada ao usuário, o fazendo questionar de sua vida e existência. Lembre-se, todos são militares(alguns civis), mas todos tem chance de serem bons, se fizerão cagada, a culpa é total deles, você está encarregado de punir.
-- Se tiver descrição de IMAGEM: use isso como evidência extra (não invente).
+- Conversa normal/pergunta: responda curto.
+- Ofensa direta: sugira timeout curto.
+- Ameaça séria: sugira timeout maior.
+- Calúnia/difamação séria: sugira timeout e motivo "Calúnia".
+- Discurso de ódio: mandar parar e sugerir punição se insistir.
+- Spam: sugerir timeout 5 min.
 
 JSON DE SAÍDA (somente um objeto):
 {{
@@ -532,19 +579,10 @@ def can_timeout(botm: discord.Member, target: discord.Member) -> tuple[bool, str
 
 async def apply_timeout(member: discord.Member, seconds: int) -> tuple[bool, str]:
     try:
+        seconds = min(max(60, int(seconds)), 86400)
         botm = get_bot_member(member.guild)
         if not botm:
             return False, "Falha ao localizar o membro do bot no servidor."
-
-        if seconds <= 0:
-            # remove timeout
-            ok, why = can_timeout(botm, member)
-            if not ok:
-                return False, why
-            await member.timeout(None)
-            return True, ""
-
-        seconds = min(max(60, int(seconds)), 86400)
         ok, why = can_timeout(botm, member)
         if not ok:
             return False, why
@@ -554,71 +592,6 @@ async def apply_timeout(member: discord.Member, seconds: int) -> tuple[bool, str
         return False, "Discord bloqueou a ação (permissão/erro HTTP)."
     except Exception:
         return False, "Erro interno ao aplicar timeout."
-
-def removable_roles_for_target(target: discord.Member) -> list[discord.Role]:
-    guild = target.guild
-    botm = get_bot_member(guild)
-    if not botm:
-        return []
-
-    if not getattr(botm.guild_permissions, "manage_roles", False):
-        return []
-
-    bot_top = botm.top_role.position
-    out: list[discord.Role] = []
-    for r in target.roles:
-        if r.name == "@everyone":
-            continue
-        if r.managed:
-            continue
-        if r.position >= bot_top:
-            continue
-        out.append(r)
-    return out
-
-async def remove_roles_all(target: discord.Member) -> tuple[bool, str, list[int]]:
-    roles = removable_roles_for_target(target)
-    if not roles:
-        return False, "Sem cargos removíveis (ou sem permissão de gerenciar cargos).", []
-    try:
-        role_ids = [r.id for r in roles]
-        await target.remove_roles(*roles, reason="Admin: remove all roles")
-        return True, "", role_ids
-    except (discord.Forbidden, discord.HTTPException):
-        return False, "Discord bloqueou a remoção de cargos (permissão/hierarquia).", []
-    except Exception:
-        return False, "Erro interno ao remover cargos.", []
-
-async def restore_roles(target: discord.Member, role_ids: list[int]) -> tuple[bool, str]:
-    if not role_ids:
-        return False, "Nenhum cargo salvo para restaurar.", ""
-    guild = target.guild
-    roles: list[discord.Role] = []
-    botm = get_bot_member(guild)
-    if not botm or not getattr(botm.guild_permissions, "manage_roles", False):
-        return False, "Sem permissão de gerenciar cargos.", ""
-
-    bot_top = botm.top_role.position
-    for rid in role_ids:
-        r = guild.get_role(int(rid))
-        if not r:
-            continue
-        if r.managed:
-            continue
-        if r.position >= bot_top:
-            continue
-        roles.append(r)
-
-    if not roles:
-        return False, "Nenhum cargo restaurável (hierarquia/roles não existem).", ""
-
-    try:
-        await target.add_roles(*roles, reason="Admin: restore roles")
-        return True, "", ""
-    except (discord.Forbidden, discord.HTTPException):
-        return False, "Discord bloqueou a adição de cargos (permissão/hierarquia).", ""
-    except Exception:
-        return False, "Erro interno ao restaurar cargos.", ""
 
 # ================= MESSAGE TARGETING =================
 async def resolve_reference_message(message: discord.Message) -> Optional[discord.Message]:
@@ -642,21 +615,19 @@ def get_targets_from_message(message: discord.Message, reply_target: Optional[di
         targets = [reply_target]
     return targets
 
-def is_unmute_command(text: str) -> bool:
+def looks_like_punish_command(text: str) -> bool:
     low = (text or "").lower()
-    return any(k in low for k in ["desmuta", "unmute", "desmute", "remove timeout", "tira timeout", "untimeout", "descastiga", "perdoa", "libera"])
+    punish_words = ["pune", "punir", "puni", "aplica", "aplique", "castiga", "castigar"]
+    timeout_words = ["muta", "mute", "timeout", "silencia", "silencie", "calado", "calar"]
+    return any(w in low for w in punish_words) and any(w in low for w in timeout_words)
 
-# ================= ADMIN COMMANDS (LOCAL + COMPLETO) =================
-async def handle_admin_commands(message: discord.Message, controller: discord.Member, reply_target: Optional[discord.Member], referenced: Optional[discord.Message]) -> bool:
+# ================= ADMIN COMMANDS (LOCAL + ROBUSTO) =================
+async def handle_admin_commands(message: discord.Message, controller: discord.Member, reply_target: Optional[discord.Member]) -> bool:
     """
-    Comandos admin sem depender do modelo.
-    - timeout/mute com tempo escolhido
-    - desmutar
-    - remove todos cargos (salva)
-    - restaura cargos
-    - ignore / unignore
-    - pause / resume
-    - diretivas
+    Admin commands SEM depender do modelo.
+    Agora aceita:
+    - "mute/muta/timeout/silencia" (com reply ou @alvo)
+    - "pune ... mutando" (com reply ou @alvo)
     """
     if not message.guild:
         return False
@@ -693,7 +664,7 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
                 save_state_sync(st)
             await reply_soft(message, "Ok.")
             return True
-        await reply_soft(message, "Pra ignorar, responda a mensagem do alvo ou mencione o alvo.")
+        await reply_soft(message, "Para ignorar, responda a mensagem do alvo ou mencione o alvo.")
         return True
 
     if any(k in low for k in ["designora", "unignore", "volta a responder", "responde de novo"]):
@@ -705,88 +676,28 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
                 save_state_sync(st)
             await reply_soft(message, "Ok.")
             return True
-        await reply_soft(message, "Pra designorar, responda a mensagem do alvo ou mencione o alvo.")
+        await reply_soft(message, "Para designorar, responda a mensagem do alvo ou mencione o alvo.")
         return True
 
-    # remove todos os cargos (salva)
-    if any(k in low for k in ["remove todos os cargos", "remova todos os cargos", "tira todos os cargos", "limpa cargos", "resetar cargos", "remove cargos"]):
+    # timeout / mute (agora reconhece "pune ... mutando" também)
+    if any(k in low for k in ["muta", "mute", "timeout", "silencia", "silencie"]) or looks_like_punish_command(text):
         if not targets:
-            await reply_soft(message, "Pra remover cargos, responda a mensagem do alvo ou mencione o alvo.")
-            return True
-        ok_any = False
-        last_fail = ""
-        async with state_lock:
-            st = load_state_sync()
-            saved_roles = st.setdefault("saved_roles", {})
-
-            for t in targets:
-                ok, why, role_ids = await remove_roles_all(t)
-                if ok:
-                    ok_any = True
-                    saved_roles[str(t.id)] = role_ids
-                else:
-                    last_fail = why
-
-            save_state_sync(st)
-
-        await reply_soft(message, "Feito." if ok_any else f"Não consegui remover cargos. {last_fail}".strip())
-        return True
-
-    # restaura cargos
-    if any(k in low for k in ["restaura cargos", "restaurar cargos", "devolve cargos", "volta cargos", "devolver cargos"]):
-        if not targets:
-            await reply_soft(message, "Pra restaurar cargos, responda a mensagem do alvo ou mencione o alvo.")
+            await reply_soft(message, "Para punir, responda a mensagem do alvo ou mencione o alvo.")
             return True
 
-        ok_any = False
-        last_fail = ""
-
-        async with state_lock:
-            st = load_state_sync()
-            saved_roles = st.setdefault("saved_roles", {})
-
-            for t in targets:
-                role_ids = saved_roles.get(str(t.id), [])
-                ok, why, _ = await restore_roles(t, role_ids)
-                if ok:
-                    ok_any = True
-                    # opcional: limpar após restaurar
-                    saved_roles.pop(str(t.id), None)
-                else:
-                    last_fail = why
-
-            save_state_sync(st)
-
-        await reply_soft(message, "Feito." if ok_any else f"Não consegui restaurar cargos. {last_fail}".strip())
-        return True
-
-    # timeout / mute / unmute
-    if any(k in low for k in ["muta", "mute", "timeout", "silencia", "silencie"]) or is_unmute_command(text):
-        if not targets:
-            await reply_soft(message, "Pra punir/despunir, responda a mensagem do alvo ou mencione o alvo.")
-            return True
-
-        if is_unmute_command(text):
-            secs = 0
-        else:
-            secs = parse_duration_seconds(low) or DEFAULT_TIMEOUT_SECONDS
-
+        secs = parse_duration_seconds(low) or 300
         ok_any = False
         last_fail = ""
         for t in targets:
             ok, why = await apply_timeout(t, secs)
-            if ok:
-                ok_any = True
-                # se foi timeout e a punição veio por reply, tenta apagar a mensagem do alvo
-                if secs > 0 and referenced and isinstance(referenced.author, discord.Member) and referenced.author.id == t.id:
-                    await safe_delete_message(referenced)
-            else:
+            ok_any |= ok
+            if not ok:
                 last_fail = why
 
         if ok_any:
             await reply_soft(message, "Feito.")
         else:
-            await reply_soft(message, f"Não consegui executar. {last_fail}".strip())
+            await reply_soft(message, f"Não consegui punir. {last_fail}".strip())
         return True
 
     # diretivas (memória)
@@ -889,7 +800,7 @@ async def on_message(message: discord.Message):
     # ===== ADMIN COMMANDS (SEM IA) =====
     if is_controller(controller):
         try:
-            did_admin = await handle_admin_commands(message, controller, reply_target_member, referenced)
+            did_admin = await handle_admin_commands(message, controller, reply_target_member)
             if did_admin:
                 return
         except Exception:
@@ -897,12 +808,8 @@ async def on_message(message: discord.Message):
 
     bot_busy = True
     try:
-        # ===== AUTO-MOD (quando estiver falando direto com o bot) =====
         # gramática (só quando falando direto com o bot, não reportando via reply)
         if referenced is None and message.channel.id != CHAT_GERAL_ID and absence_grammar(controller_text):
-            # apaga a mensagem do usuário (se tiver permissão)
-            await safe_delete_message(message)
-
             async with message.channel.typing():
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
             ok, why = await apply_timeout(controller, 60)
@@ -916,8 +823,6 @@ async def on_message(message: discord.Message):
         # spam local do controlador
         update_history(controller.id, controller_text)
         if detect_exact_repeat_spam(controller.id):
-            await safe_delete_message(message)
-
             async with message.channel.typing():
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
             ok, why = await apply_timeout(controller, 300)
@@ -929,8 +834,6 @@ async def on_message(message: discord.Message):
             return
 
         if detect_emoji_spam(controller_text):
-            await safe_delete_message(message)
-
             async with message.channel.typing():
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
             ok, why = await apply_timeout(controller, 60)
@@ -948,21 +851,23 @@ async def on_message(message: discord.Message):
             st["directives"] = directives
             save_state_sync(st)
 
-        system_prompt = build_system_prompt(is_controller(controller), directives)
+        admin_mode = is_controller(controller)
+        system_prompt = build_system_prompt(admin_mode, directives)
 
-        # ==== Determina ALVO para o modelo (nunca adivinhar) ====
+        # ==== Determina ALVO para o modelo (NUNCA o admin por padrão) ====
         offender: Optional[discord.Member] = None
+        # prioridade: reply
         if reply_target_member and not reply_target_member.bot:
             offender = reply_target_member
         else:
-            mentioned_targets = [
-                m for m in message.mentions
-                if isinstance(m, discord.Member) and not m.bot and (client.user is None or m.id != client.user.id)
-            ]
+            # se mencionou alguém além do bot
+            mentioned_targets = [m for m in message.mentions if isinstance(m, discord.Member) and not m.bot and (client.user is None or m.id != client.user.id)]
             if mentioned_targets:
                 offender = mentioned_targets[0]
 
-        offense_text = (referenced.content or "").strip() if referenced else ""
+        offense_text = ""
+        if referenced:
+            offense_text = (referenced.content or "").strip()
 
         roles = roles_for_prompt(controller)
         roles_str = ", ".join(roles) if roles else "(sem cargos)"
@@ -987,13 +892,12 @@ async def on_message(message: discord.Message):
 
         base_context += f"TEXTO DO CONTROLADOR:\n{controller_text}\n"
 
-        # anexos de texto
+        # anexos
         attachments: list[discord.Attachment] = []
-        if referenced:
-            try:
-                attachments.extend(list(getattr(referenced, "attachments", [])))
-            except Exception:
-                pass
+        try:
+            attachments.extend(list(getattr(referenced, "attachments", []))) if referenced else None
+        except Exception:
+            pass
         try:
             attachments.extend(list(getattr(message, "attachments", [])))
         except Exception:
@@ -1039,8 +943,10 @@ async def on_message(message: discord.Message):
         punish_target = (d.get("punish_target") or "offender").strip().lower()
         reply = strip_questions((d.get("reply") or "").strip())
         reason = (d.get("reason") or "Conduta inadequada").strip()
+        violation = (d.get("violation") or "none").strip().lower()
         seconds = int(d.get("timeout_seconds", 0) or 0)
 
+        # === SAFETY: modelo não pode punir admin por “acidente” ===
         punish_member: Optional[discord.Member] = None
         if punish_target == "offender":
             punish_member = offender
@@ -1048,6 +954,12 @@ async def on_message(message: discord.Message):
             punish_member = controller
         else:
             punish_member = None
+
+        if punish_member and is_controller(punish_member) and punish_member.id == controller.id:
+            # nunca punir o solicitante por decisão do modelo
+            action = "reply"
+            reason = "Comando ambíguo"
+            seconds = 0
 
         if action == "ignore":
             return
@@ -1062,11 +974,6 @@ async def on_message(message: discord.Message):
             seconds = min(max(60, seconds), 86400)
 
             await reply_soft(message, reply or "Ok.")
-
-            # apaga mensagem do infrator se existir (reply/report)
-            if referenced and isinstance(referenced.author, discord.Member) and referenced.author.id == punish_member.id:
-                await safe_delete_message(referenced)
-
             ok, why = await apply_timeout(punish_member, seconds)
             if ok:
                 await punishment_report(message.channel, punish_member, reason, seconds)
