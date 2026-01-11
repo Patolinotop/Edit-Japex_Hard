@@ -21,7 +21,8 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "hf").strip().lower()  # "hf" or "openr
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 HF_CHAT_URL = os.getenv("HF_CHAT_URL", "https://router.huggingface.co/v1/chat/completions").strip()
 HF_COMPLETIONS_URL = os.getenv("HF_COMPLETIONS_URL", "https://router.huggingface.co/v1/completions").strip()
-HF_INFERENCE_URL_TMPL = os.getenv("HF_INFERENCE_URL_TMPL", "https://api-inference.huggingface.co/models/{model}").strip()
+HF_INFERENCE_URL_TMPL = os.getenv("HF_INFERENCE_URL_TMPL","https://router.huggingface.co/hf-inference/models/{model}").strip()
+
 
 HF_MODEL = (os.getenv("HF_MODEL") or os.getenv("MODEL") or "meta-llama/Meta-Llama-3-8B-Instruct").strip()
 HF_MODELS = os.getenv("HF_MODELS", "").strip()  # "modelA,modelB,..."
