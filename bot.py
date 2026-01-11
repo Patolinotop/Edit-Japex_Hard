@@ -13,24 +13,26 @@ from typing import Any, Optional
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b").strip()
-OPENROUTER_MODELS = os.getenv("OPENROUTER_MODELS", "").strip()
+# Hugging Face (OpenAI-compatible router)
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+HF_BASE_URL = os.getenv("HF_BASE_URL", "https://router.huggingface.co/v1/chat/completions").strip()
 
-VISION_MODEL = os.getenv("VISION_MODEL", "openai/gpt-4o-mini").strip()
-ATTACHMENT_TEXT_MODEL = os.getenv("ATTACHMENT_TEXT_MODEL", "openai/gpt-5-nano").strip()
-COMMAND_MODEL = os.getenv("COMMAND_MODEL", "openai/gpt-5-nano").strip()  # (não obrigatório aqui, mas deixei)
+# Modelo principal: pegue do Railway (HF_MODEL) ou (MODEL)
+HF_MODEL = (os.getenv("HF_MODEL") or os.getenv("MODEL") or "meta-llama/Meta-Llama-3-8B-Instruct").strip()
+HF_MODELS = os.getenv("HF_MODELS", "").strip()  # fallback: "modelA,modelB"
+
+# Modelos auxiliares (opcionais)
+VISION_MODEL = os.getenv("VISION_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct").strip()
+ATTACHMENT_TEXT_MODEL = os.getenv("ATTACHMENT_TEXT_MODEL", "").strip()  # se vazio, usa o principal
 
 BOT_NAME = "Edit_Japex"
 PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 VERSION_MAJOR = 2
-VERSION_MINOR = 0
+VERSION_MINOR = 1
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-CHAT_GERAL_ID = int(os.getenv("CHAT_GERAL_ID", "1450594073596395548"))
+CHAT_GERAL_ID = int(os.getenv("CHAT_GERAL_ID", "1457496484017733672"))
 
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "320"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.55"))
@@ -40,7 +42,6 @@ VISION_TIMEOUT_S = int(os.getenv("VISION_TIMEOUT_S", "75"))
 EXTRA_TYPING_SECONDS = float(os.getenv("EXTRA_TYPING_SECONDS", "1.5"))
 
 AUTHORIZED_IDS_ENV = os.getenv("AUTHORIZED_IDS", "").strip()
-
 STATE_FILE = os.getenv("STATE_FILE", "admin_state.json")
 
 HIST_MAX = int(os.getenv("HIST_MAX", "8"))
@@ -312,83 +313,97 @@ async def fetch_text_attachment(att: discord.Attachment) -> str:
     except Exception:
         return ""
 
-# ================= OPENROUTER =================
-def get_model_payload_fields(default_model: Optional[str] = None) -> dict:
-    if default_model:
-        return {"model": default_model}
-    if OPENROUTER_MODELS:
-        models = [m.strip() for m in OPENROUTER_MODELS.split(",") if m.strip()]
-        if models:
-            return {"models": models, "route": "fallback"}
-    return {"model": OPENROUTER_MODEL}
+# ================= HUGGING FACE (OpenAI-compatible) =================
+def get_candidate_models(model_override: Optional[str] = None) -> list[str]:
+    """
+    Ordem:
+    1) override
+    2) HF_MODELS (lista)
+    3) HF_MODEL (único)
+    """
+    if model_override and model_override.strip():
+        return [model_override.strip()]
 
-async def call_openrouter(
-    system_prompt: str,
-    user_content: Any,
+    if HF_MODELS:
+        models = [m.strip() for m in HF_MODELS.split(",") if m.strip()]
+        if models:
+            return models
+
+    return [HF_MODEL]
+
+async def hf_chat_completions(
+    messages: list[dict[str, Any]],
     end_user_id: Optional[str] = None,
     model_override: Optional[str] = None,
-    force_json: bool = True,
+    response_format: Optional[dict[str, Any]] = None,
     timeout_s: Optional[int] = None,
 ) -> str:
+    if not HF_TOKEN:
+        raise RuntimeError("HF_TOKEN não configurado no ambiente.")
+
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {HF_TOKEN}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://railway.app",
-        "X-Title": BOT_NAME,
     }
 
-    payload: dict[str, Any] = {
-        **get_model_payload_fields(model_override),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+    payload_base: dict[str, Any] = {
+        "messages": messages,
         "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE,
     }
-    if force_json:
-        payload["response_format"] = {"type": "json_object"}
     if end_user_id:
-        payload["user"] = str(end_user_id)
+        # compatível com OpenAI-like. Se o backend ignorar, ok.
+        payload_base["user"] = str(end_user_id)
+    if response_format:
+        payload_base["response_format"] = response_format
 
     timeout = aiohttp.ClientTimeout(total=int(timeout_s or REQUEST_TIMEOUT_S))
 
     async def _post(p: dict[str, Any]) -> dict:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(OPENROUTER_URL, headers=headers, json=p) as r:
-                return await r.json()
+            async with session.post(HF_BASE_URL, headers=headers, json=p) as r:
+                data = await r.json(content_type=None)
+                if r.status >= 400:
+                    # tenta padronizar erro
+                    msg = ""
+                    if isinstance(data, dict):
+                        err = data.get("error")
+                        if isinstance(err, dict):
+                            msg = err.get("message", "") or str(err)
+                        elif isinstance(err, str):
+                            msg = err
+                        else:
+                            msg = str(data)
+                    else:
+                        msg = str(data)
+                    raise RuntimeError(f"HF error (HTTP {r.status}): {msg}")
+                return data
 
-    data = await _post(payload)
+    last_err: Optional[Exception] = None
 
-    if isinstance(data, dict) and "error" in data:
-        msg = data["error"].get("message") if isinstance(data["error"], dict) else str(data["error"])
-        lowered = (msg or "").lower()
+    for model in get_candidate_models(model_override):
+        payload = dict(payload_base)
+        payload["model"] = model
 
-        payload2 = dict(payload)
-        retried = False
+        # retry curto p/ casos de cold start / instabilidade
+        for attempt in range(3):
+            try:
+                data = await _post(payload)
+                return data["choices"][0]["message"]["content"]
+            except Exception as e:
+                last_err = e
+                # backoff leve
+                await asyncio.sleep(0.8 + attempt * 0.8)
 
-        if "response_format" in lowered or "structured" in lowered:
-            payload2.pop("response_format", None)
-            retried = True
-        if "temperature" in lowered or "sampling" in lowered:
-            payload2.pop("temperature", None)
-            retried = True
-
-        if retried:
-            data = await _post(payload2)
-
-    if isinstance(data, dict) and "error" in data:
-        msg = data["error"].get("message") if isinstance(data["error"], dict) else str(data["error"])
-        raise RuntimeError(f"OpenRouter error: {msg}")
-
-    return data["choices"][0]["message"]["content"]
+    raise RuntimeError(f"Falha ao chamar HF em todos os modelos. Último erro: {last_err!r}")
 
 # ================= PROMPTS =================
 def build_system_prompt(admin_mode: bool, active_directives: list[str]) -> str:
     directives_block = "\n".join(f"- {x}" for x in active_directives) if active_directives else "(nenhuma)"
 
+    # Nota: mantive o bot firme, mas sem incentivar assédio/abuso.
     return f"""
-Você é {BOT_NAME}. Direto e firme.
+Você é {BOT_NAME}. Você é um bot que deve servir ao Japex e o bajular, responder com respeito a dúvida de todos e caso necessário partir a pressão psicológica.
 
 ESTILO:
 - Respostas curtas, frias e objetivas, mantenha o máximo de respeito com seus superiores e subalternos; para militares bisonhos que façam perguntas IDIOTAS é permitido utilizar-se de pressão psicológica séria pesada, com grosseria como "Cala boca, Verme." ou "Silêncio, Animal."
@@ -467,12 +482,6 @@ async def apply_ban(guild: discord.Guild, user: discord.Member, reason: str = ""
         return False
 
 def removable_roles_for_target(target: discord.Member) -> list[discord.Role]:
-    """
-    Remove tudo possível:
-    - não remove @everyone
-    - não remove roles managed (integrações/bot)
-    - não remove roles >= top_role do bot
-    """
     guild = target.guild
     botm = get_bot_member(guild)
     if not botm:
@@ -531,16 +540,21 @@ async def resolve_reference_message(message: discord.Message) -> Optional[discor
 
 # ================= VISION FLOW =================
 async def describe_images_with_vision(image_urls: list[str], context_text: str, end_user_id: str) -> str:
-    parts = [{"type": "text", "text": context_text}]
+    # Formato OpenAI-compatible: content = [{type:text}, {type:image_url,...}]
+    content: list[dict[str, Any]] = [{"type": "text", "text": context_text}]
     for url in image_urls[:4]:
-        parts.append({"type": "image_url", "image_url": {"url": url}})
+        content.append({"type": "image_url", "image_url": {"url": url}})
 
-    raw = await call_openrouter(
-        build_vision_system_prompt(),
-        parts,
+    messages = [
+        {"role": "system", "content": build_vision_system_prompt()},
+        {"role": "user", "content": content},
+    ]
+
+    raw = await hf_chat_completions(
+        messages=messages,
         end_user_id=end_user_id,
         model_override=VISION_MODEL,
-        force_json=False,
+        response_format={"type": "text"},
         timeout_s=VISION_TIMEOUT_S,
     )
     return (raw or "").strip()
@@ -558,10 +572,6 @@ def extract_admin_text(message: discord.Message) -> str:
     return (message.content or "").replace(f"<@{client.user.id}>", "").strip()
 
 async def handle_admin_commands(message: discord.Message, controller: discord.Member, reply_target: Optional[discord.Member]) -> bool:
-    """
-    Executa comandos admin SEM depender do modelo.
-    Retorna True se executou algo e encerrou.
-    """
     if not message.guild:
         return False
 
@@ -633,10 +643,8 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
         await reply_soft(message, "..." if ok_any else "...")
         return True
 
-    # roles via role_mentions
     role_mentions: list[discord.Role] = list(getattr(message, "role_mentions", []))
 
-    # remover TODOS os cargos (se não tiver role mention)
     if targets and any(k in low for k in ["remove os cargos", "remova os cargos", "tira os cargos", "tirar os cargos", "limpa cargos", "resetar cargos"]):
         if not role_mentions:
             ok_any = False
@@ -645,7 +653,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
             await reply_soft(message, "..." if ok_any else "...")
             return True
 
-    # remover cargos específicos (se tiver role mention)
     if targets and role_mentions and any(k in low for k in ["tira", "remova", "remove", "remover", "tirar cargo", "remove cargo", "remova cargo"]):
         ok_any = False
         for t in targets:
@@ -653,7 +660,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
         await reply_soft(message, "..." if ok_any else "...")
         return True
 
-    # adicionar cargos específicos
     if targets and role_mentions and any(k in low for k in ["dá cargo", "da cargo", "dar cargo", "adiciona", "adicionar", "add cargo", "promove", "seta cargo"]):
         ok_any = False
         for t in targets:
@@ -661,7 +667,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
         await reply_soft(message, "..." if ok_any else "...")
         return True
 
-    # diretivas (memória)
     if any(k in low for k in ["diretiva:", "ordem:", "memoriza:"]):
         parts = text.split(":", 1)
         directive = parts[1].strip() if len(parts) > 1 else ""
@@ -688,8 +693,12 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
 @client.event
 async def on_ready():
     print(f"✅ {BOT_NAME} online | v{VERSION_MAJOR}.{VERSION_MINOR}")
+    print(f"🤖 HF endpoint: {HF_BASE_URL}")
+    print(f"🧠 HF model: {HF_MODEL}")
     if not AUTHORIZED_IDS:
         print("⚠️ Nenhum AUTHORIZED_ID detectado. Configure AUTHORIZED_IDS no .env ou coloque IDs nas REGRAS.")
+    if not HF_TOKEN:
+        print("⚠️ HF_TOKEN não configurado. O bot não conseguirá chamar o modelo.")
 
 @client.event
 async def on_message(message: discord.Message):
@@ -744,7 +753,6 @@ async def on_message(message: discord.Message):
                 st.get("ignored_user_ids", {}).pop(str(controller.id), None)
                 save_state_sync(st)
 
-    # alvo por reply (pune o autor da mensagem referenciada)
     referenced = await resolve_reference_message(message)
     target_msg = referenced or message
 
@@ -761,7 +769,6 @@ async def on_message(message: discord.Message):
             if did_admin:
                 return
         except Exception:
-            # sem "erro interno"
             return
 
     bot_busy = True
@@ -772,7 +779,7 @@ async def on_message(message: discord.Message):
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
             ok = await apply_timeout(controller, 60)
             if ok:
-                await reply_soft(message, "Fala direito.")
+                await reply_soft(message, "Escreva com clareza.")
                 await punishment_report(message.channel, controller, "Ausência gramatical", 60)
             return
 
@@ -792,7 +799,7 @@ async def on_message(message: discord.Message):
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
             ok = await apply_timeout(controller, 60)
             if ok:
-                await reply_soft(message, "Para.")
+                await reply_soft(message, "Pare.")
                 await punishment_report(message.channel, controller, "Spam de símbolos", 60)
             return
 
@@ -867,20 +874,25 @@ async def on_message(message: discord.Message):
         if image_description:
             final_user_prompt += "\n\nDESCRIÇÃO DA IMAGEM (vision):\n" + image_description
 
-        chosen_model = ATTACHMENT_TEXT_MODEL if text_blobs else None
+        chosen_model = None
+        if text_blobs and ATTACHMENT_TEXT_MODEL:
+            chosen_model = ATTACHMENT_TEXT_MODEL
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": final_user_prompt},
+        ]
 
         async with message.channel.typing():
             await asyncio.sleep(EXTRA_TYPING_SECONDS)
-            raw = await call_openrouter(
-                system_prompt,
-                final_user_prompt,
+            raw = await hf_chat_completions(
+                messages=messages,
                 end_user_id=str(controller.id),
                 model_override=chosen_model,
-                force_json=True,
+                response_format={"type": "json_object"},
                 timeout_s=REQUEST_TIMEOUT_S,
             )
 
-        # se não vier JSON, responde assim mesmo (não fica mudo)
         js = extract_json_object(raw)
         if not js:
             txt = strip_questions((raw or "").strip())
