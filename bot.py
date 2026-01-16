@@ -20,13 +20,13 @@ OPENROUTER_MODELS = os.getenv("OPENROUTER_MODELS", "").strip()
 
 VISION_MODEL = os.getenv("VISION_MODEL", "openai/gpt-4o-mini").strip()
 ATTACHMENT_TEXT_MODEL = os.getenv("ATTACHMENT_TEXT_MODEL", "openai/gpt-5-nano").strip()
-COMMAND_MODEL = os.getenv("COMMAND_MODEL", "openai/gpt-5-nano").strip()  # (não obrigatório aqui, mas deixei)
+COMMAND_MODEL = os.getenv("COMMAND_MODEL", "openai/gpt-5-nano").strip()
 
 BOT_NAME = "Edit_Japex"
 PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 VERSION_MAJOR = 2
-VERSION_MINOR = 0
+VERSION_MINOR = 1  # bump
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -40,13 +40,17 @@ VISION_TIMEOUT_S = int(os.getenv("VISION_TIMEOUT_S", "75"))
 EXTRA_TYPING_SECONDS = float(os.getenv("EXTRA_TYPING_SECONDS", "1.5"))
 
 AUTHORIZED_IDS_ENV = os.getenv("AUTHORIZED_IDS", "").strip()
-
 STATE_FILE = os.getenv("STATE_FILE", "admin_state.json")
 
 HIST_MAX = int(os.getenv("HIST_MAX", "8"))
 HIST_TTL_S = int(os.getenv("HIST_TTL_S", "900"))
 
 MAX_TEXT_ATTACHMENT_CHARS = int(os.getenv("MAX_TEXT_ATTACHMENT_CHARS", "12000"))
+
+# --- NOVO: anti-false-report tuning ---
+FALSE_REPORT_TIMEOUT_S = int(os.getenv("FALSE_REPORT_TIMEOUT_S", "60"))
+FALSE_REPORT_ESCALATE_S = int(os.getenv("FALSE_REPORT_ESCALATE_S", "300"))
+BENIGN_MAX_LEN = int(os.getenv("BENIGN_MAX_LEN", "30"))
 
 # ================= DISCORD =================
 intents = discord.Intents.default()
@@ -312,6 +316,101 @@ async def fetch_text_attachment(att: discord.Attachment) -> str:
     except Exception:
         return ""
 
+# ================= NOVO: anti-false-report heuristics =================
+ACCUSATION_KEYWORDS = [
+    "calunia", "calúnia", "difama", "difamação", "defama", "fake", "falso", "print falso",
+    "spam", "flood", "ameaça", "ameaçou", "ameaçando", "racismo", "homofobia", "xenofobia",
+    "naz", "nazi", "ódio", "odio", "insulto", "xingou", "xingo", "ofensa", "profanidade"
+]
+
+BENIGN_PATTERNS = [
+    r"^\s*oi+\s*$",
+    r"^\s*o[ií]+\s*!\s*$",
+    r"^\s*ol[aá]+\s*$",
+    r"^\s*ol[aá]+\s*!\s*$",
+    r"^\s*eai+\s*$",
+    r"^\s*eae+\s*$",
+    r"^\s*boa\s*(noite|tarde|dia)\s*$",
+    r"^\s*blz\s*$",
+    r"^\s*beleza\s*$",
+    r"^\s*ok+\s*$",
+    r"^\s*kkk+\s*$",
+]
+
+def text_has_accusation_hint(text: str) -> bool:
+    low = (text or "").lower()
+    return any(k in low for k in ACCUSATION_KEYWORDS)
+
+def is_benign_message(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return True
+    if len(t) <= 2:
+        return True
+    if len(t) <= BENIGN_MAX_LEN:
+        for pat in BENIGN_PATTERNS:
+            if re.match(pat, t, flags=re.I):
+                return True
+    # só emojis/símbolos curtos também é “fraco” (não é spam automaticamente)
+    if not any(ch.isalnum() for ch in t) and len(t) <= 12:
+        return True
+    return False
+
+def looks_like_profanity_or_insult(text: str) -> bool:
+    # lista simples (ajuste como quiser)
+    bad = [
+        "porra", "caralho", "puta", "merda", "arromb", "bosta", "fdp", "filho da puta",
+        "lixo", "verme", "idiota", "imbecil", "retard", "otario", "otário"
+    ]
+    low = (text or "").lower()
+    return any(w in low for w in bad)
+
+def looks_like_threat(text: str) -> bool:
+    low = (text or "").lower()
+    threat = ["vou te matar", "te mato", "vou te pegar", "vai morrer", "te arrebento", "tiro em você", "te dou um tiro"]
+    return any(w in low for w in threat)
+
+def evidence_present_in_offender(offense_text: str) -> bool:
+    # heurística de “tem algum indício real” no texto do alvo
+    if looks_like_threat(offense_text):
+        return True
+    if looks_like_profanity_or_insult(offense_text):
+        return True
+    if detect_emoji_spam(offense_text):
+        return True
+    # muito texto repetitivo pode ser spam (sem histórico, só pelo conteúdo)
+    if len((offense_text or "").strip()) > 180 and (offense_text.count("\n") > 8):
+        return True
+    return False
+
+def should_override_false_report(
+    referenced: bool,
+    offense_text: str,
+    reporter_text: str,
+    has_attachments: bool,
+    image_description: str
+) -> bool:
+    """
+    Se é report por reply e o repórter acusa pesado mas o alvo é claramente inocente,
+    a gente bloqueia punição do alvo e pune o repórter.
+    """
+    if not referenced:
+        return False
+    if not text_has_accusation_hint(reporter_text):
+        return False
+    if has_attachments:
+        return False
+    if image_description:
+        return False
+    if evidence_present_in_offender(offense_text):
+        return False
+    if is_benign_message(offense_text):
+        return True
+    # mesmo que não seja “oi”, se não tem evidência alguma e o repórter só acusa
+    if not offense_text.strip():
+        return True
+    return False
+
 # ================= OPENROUTER =================
 def get_model_payload_fields(default_model: Optional[str] = None) -> dict:
     if default_model:
@@ -395,12 +494,18 @@ ESTILO:
 - Não faça perguntas. Não puxe assunto.
 - Não utilize palavrões, respeito e conduta maximos, a não ser que o militar cometa algum delito, assim sendo permitido xingamentos e pressão psicologica direcionada ao usuario.
 
+REGRA CRÍTICA DE EVIDÊNCIA (ANTI-ENGANAÇÃO):
+- O "TEXTO DO CONTROLADOR/REPORTER" PODE SER MENTIROSO OU MAL-INTENCIONADO.
+- Você DEVE basear punições principalmente no que o ALVO realmente escreveu, anexos e descrição de imagem.
+- NÃO aplique timeout no ALVO apenas porque o REPORTER disse "SPAM", "CALÚNIA" etc.
+- Se o REPORTER acusar sem evidência (ex: ALVO disse "oi" e REPORTER grita "calúnia/spam"), puna o REPORTER por "Calúnia (acusação falsa)" e use punish_target="reporter".
+
 MODERAÇÃO (decida pelo conteúdo do ALVO):
-- Se for conversa normal/pergunta: responda curto, tenha opiniões pessoais e politicas.
-- Se for xingamento direcionado ou palavrão para alguém: timeout curto.
+- Se for conversa normal/pergunta: responda curto, tenha opiniões pessoais e politicas. Se forem perguntas IDIOTAS não responda, mas sempre com educação.
+- Se for xingamento direcionado ou palavrão para alguém: timeout curto + Pressão psicológica, invente os apelidos para mais criativos (e militares) humilhar e ridicularizar o infrator como "Bisonho" ou "Animal".
 - Se for ameaça séria/velada: timeout mais alto.
 - Se for calúnia/difamação séria (acusação forte sem prova): timeout curto e motivo "Calúnia".
-- Discurso de ódio: mande parar e aplique punição apenas se insistir.
+- Discurso de ódio: mande parar com respeito, segunda vez aplique pressão psicológica minima e aplique punição apenas se insistir.
 - Spam: repetição idêntica / flood -> timeout 5 min.
 - Se houver IMAGEM: descreva o que aparece e avalie se a imagem parece editada. Se for claramente montagem usada pra acusar alguém, trate como "defamation" e sugira punir o REPORTER (punish_target="reporter").
 - Se alguém cometer algum delito, permissão total para utilizar de pressão psicológica extrema, direcionada ao usuário, o fazendo questionar de sua vida e existência. Lembre-se, todos são militares(alguns civis), mas todos tem chance de serem bons, se fizerão cagada, a culpa é total deles, você está encarregado de punir.
@@ -420,7 +525,7 @@ REGRAS:
 - Responda SOMENTE com JSON válido (sem markdown). Se não conseguir, responda algo curto sem JSON.
 - "reply" não pode ter perguntas nem "?".
 - "timeout_seconds" use 60, 300, 3600 ou 86400 quando fizer sentido.
-- "punish_target": default "offender". Use "reporter" só se o reportante estiver difamando/spammando.
+- "punish_target": default "offender". Use "reporter" só se o reportante estiver difamando/spammando/caluniando.
 
 ══════════ REGRAS ABSOLUTAS ══════════
 {REGRAS_TXT}
@@ -467,12 +572,6 @@ async def apply_ban(guild: discord.Guild, user: discord.Member, reason: str = ""
         return False
 
 def removable_roles_for_target(target: discord.Member) -> list[discord.Role]:
-    """
-    Remove tudo possível:
-    - não remove @everyone
-    - não remove roles managed (integrações/bot)
-    - não remove roles >= top_role do bot
-    """
     guild = target.guild
     botm = get_bot_member(guild)
     if not botm:
@@ -558,17 +657,12 @@ def extract_admin_text(message: discord.Message) -> str:
     return (message.content or "").replace(f"<@{client.user.id}>", "").strip()
 
 async def handle_admin_commands(message: discord.Message, controller: discord.Member, reply_target: Optional[discord.Member]) -> bool:
-    """
-    Executa comandos admin SEM depender do modelo.
-    Retorna True se executou algo e encerrou.
-    """
     if not message.guild:
         return False
 
     text = extract_admin_text(message)
     low = text.lower()
 
-    # pause/resume
     if any(k in low for k in ["pausa", "pause", "pausar bot", "silencia bot"]):
         async with state_lock:
             st = load_state_sync()
@@ -587,7 +681,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
 
     targets = get_targets_from_message(message, reply_target)
 
-    # ignore/unignore
     if any(k in low for k in ["ignora", "não responde", "nao responde", "pare de responder"]):
         if targets:
             async with state_lock:
@@ -608,7 +701,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
             await reply_soft(message, "...")
             return True
 
-    # timeout / mute
     if any(k in low for k in ["muta", "mute", "timeout", "silencia"]):
         secs = parse_duration_seconds(low) or 300
         ok_any = False
@@ -617,7 +709,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
         await reply_soft(message, "..." if ok_any else "...")
         return True
 
-    # kick
     if any(k in low for k in ["expulsa", "kick", "chuta"]):
         ok_any = False
         for t in targets:
@@ -625,7 +716,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
         await reply_soft(message, "..." if ok_any else "...")
         return True
 
-    # ban
     if any(k in low for k in ["ban", "bane", "banir"]):
         ok_any = False
         for t in targets:
@@ -633,10 +723,8 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
         await reply_soft(message, "..." if ok_any else "...")
         return True
 
-    # roles via role_mentions
     role_mentions: list[discord.Role] = list(getattr(message, "role_mentions", []))
 
-    # remover TODOS os cargos (se não tiver role mention)
     if targets and any(k in low for k in ["remove os cargos", "remova os cargos", "tira os cargos", "tirar os cargos", "limpa cargos", "resetar cargos"]):
         if not role_mentions:
             ok_any = False
@@ -645,7 +733,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
             await reply_soft(message, "..." if ok_any else "...")
             return True
 
-    # remover cargos específicos (se tiver role mention)
     if targets and role_mentions and any(k in low for k in ["tira", "remova", "remove", "remover", "tirar cargo", "remove cargo", "remova cargo"]):
         ok_any = False
         for t in targets:
@@ -653,7 +740,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
         await reply_soft(message, "..." if ok_any else "...")
         return True
 
-    # adicionar cargos específicos
     if targets and role_mentions and any(k in low for k in ["dá cargo", "da cargo", "dar cargo", "adiciona", "adicionar", "add cargo", "promove", "seta cargo"]):
         ok_any = False
         for t in targets:
@@ -661,7 +747,6 @@ async def handle_admin_commands(message: discord.Message, controller: discord.Me
         await reply_soft(message, "..." if ok_any else "...")
         return True
 
-    # diretivas (memória)
     if any(k in low for k in ["diretiva:", "ordem:", "memoriza:"]):
         parts = text.split(":", 1)
         directive = parts[1].strip() if len(parts) > 1 else ""
@@ -698,7 +783,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # só reage quando marcado
     if client.user not in message.mentions:
         return
 
@@ -716,7 +800,6 @@ async def on_message(message: discord.Message):
     controller_text = extract_admin_text(message)
     low = controller_text.lower()
 
-    # comandos simples
     if "modelo" in low:
         await reply_soft(message, PUBLIC_MODEL_NAME)
         return
@@ -724,15 +807,12 @@ async def on_message(message: discord.Message):
         await reply_soft(message, f"v{VERSION_MAJOR}.{VERSION_MINOR}")
         return
 
-    # carrega estado
     async with state_lock:
         state = load_state_sync()
 
-    # pausado => só controller
     if state.get("paused") and not is_controller(controller):
         return
 
-    # ignore list (para quem pinga o bot)
     ignored = state.get("ignored_user_ids", {}).get(str(controller.id))
     if ignored:
         until = ignored.get("until", 0)
@@ -744,7 +824,6 @@ async def on_message(message: discord.Message):
                 st.get("ignored_user_ids", {}).pop(str(controller.id), None)
                 save_state_sync(st)
 
-    # alvo por reply (pune o autor da mensagem referenciada)
     referenced = await resolve_reference_message(message)
     target_msg = referenced or message
 
@@ -761,7 +840,6 @@ async def on_message(message: discord.Message):
             if did_admin:
                 return
         except Exception:
-            # sem "erro interno"
             return
 
     bot_busy = True
@@ -776,8 +854,11 @@ async def on_message(message: discord.Message):
                 await punishment_report(message.channel, controller, "Ausência gramatical", 60)
             return
 
-        # spam local do controlador
+        # spam local: controlador e também alvo (se alvo for um member)
         update_history(controller.id, controller_text)
+        if isinstance(offender, discord.Member):
+            update_history(offender.id, (target_msg.content or "").strip())
+
         if detect_exact_repeat_spam(controller.id):
             async with message.channel.typing():
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
@@ -837,12 +918,12 @@ async def on_message(message: discord.Message):
         reporter_text = controller_text
 
         base_context = (
-            f"CONTROLADOR: {controller.display_name} (id {controller.id})\n"
+            f"CONTROLADOR/REPORTER: {controller.display_name} (id {controller.id})\n"
             f"CONTROLADOR top cargos: {top_roles}\n"
             f"CONTROLADOR todos cargos: {roles_str}\n\n"
-            f"ALVO (possível infrator): {offender.display_name} (id {offender.id})\n"
+            f"ALVO (mensagem analisada): {offender.display_name} (id {offender.id})\n"
             f"MENSAGEM DO ALVO:\n{offense_text}\n\n"
-            f"TEXTO DO CONTROLADOR:\n{reporter_text}\n"
+            f"TEXTO DO REPORTER (pode ser falso):\n{reporter_text}\n"
         )
 
         if text_blobs:
@@ -862,6 +943,24 @@ async def on_message(message: discord.Message):
                 except Exception:
                     image_description = ""
 
+        # --- NOVO: PRE-CHECK anti falso report (sem anexos/sem visão) ---
+        has_any_attachments = bool(attachments)
+        if should_override_false_report(
+            referenced=referenced is not None,
+            offense_text=offense_text,
+            reporter_text=reporter_text,
+            has_attachments=has_any_attachments,
+            image_description=image_description
+        ):
+            # pune o REPORTER por acusação sem evidência
+            streak = bump_violation(controller.id, "defamation")
+            secs = FALSE_REPORT_TIMEOUT_S if streak < 2 else FALSE_REPORT_ESCALATE_S
+            await reply_soft(message, "Acusação sem base.")
+            ok = await apply_timeout(controller, secs)
+            if ok:
+                await punishment_report(message.channel, controller, "Calúnia (acusação falsa)", secs)
+            return
+
         # ===== ETAPA 2: decisão final =====
         final_user_prompt = base_context
         if image_description:
@@ -880,7 +979,6 @@ async def on_message(message: discord.Message):
                 timeout_s=REQUEST_TIMEOUT_S,
             )
 
-        # se não vier JSON, responde assim mesmo (não fica mudo)
         js = extract_json_object(raw)
         if not js:
             txt = strip_questions((raw or "").strip())
@@ -900,6 +998,24 @@ async def on_message(message: discord.Message):
         reason = (d.get("reason") or "Conduta inadequada").strip()
         violation = (d.get("violation") or "none").strip().lower()
         seconds = int(d.get("timeout_seconds", 0) or 0)
+
+        # --- NOVO: SANITY CHECK pós-modelo (bloqueia “acreditar no reporter”) ---
+        if (action == "timeout"
+            and punish_target == "offender"
+            and referenced is not None
+            and text_has_accusation_hint(reporter_text)
+            and not image_description
+            and not has_any_attachments
+            and not evidence_present_in_offender(offense_text)
+            and is_benign_message(offense_text)
+        ):
+            # converte pra punir o REPORTER
+            punish_target = "reporter"
+            violation = "defamation"
+            reason = "Calúnia (acusação falsa)"
+            seconds = FALSE_REPORT_TIMEOUT_S
+            reply = reply or "Acusação sem base."
+            action = "timeout"
 
         punish_member: Optional[discord.Member] = None
         if punish_target == "reporter":
