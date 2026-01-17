@@ -26,7 +26,7 @@ BOT_NAME = "Edit_Japex"
 PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 VERSION_MAJOR = 2
-VERSION_MINOR = 3
+VERSION_MINOR = 4
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -43,7 +43,6 @@ AUTHORIZED_IDS_ENV = os.getenv("AUTHORIZED_IDS", "").strip()
 STATE_FILE = os.getenv("STATE_FILE", "admin_state.json")
 
 HIST_TTL_S = int(os.getenv("HIST_TTL_S", "900"))
-
 MAX_TEXT_ATTACHMENT_CHARS = int(os.getenv("MAX_TEXT_ATTACHMENT_CHARS", "12000"))
 
 CHANNEL_HISTORY_SCAN = int(os.getenv("CHANNEL_HISTORY_SCAN", "80"))
@@ -56,7 +55,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-# deixa logs do discord visíveis também
 discord.utils.setup_logging(level=logging.INFO)
 
 # ================= DISCORD =================
@@ -206,13 +204,6 @@ def bump_violation(uid: int, vtype: str) -> int:
     d["last_ts"] = now
     return int(d["count"])
 
-def is_image_attachment(att: discord.Attachment) -> bool:
-    ct = (att.content_type or "").lower()
-    fn = (att.filename or "").lower()
-    if ct.startswith("image/"):
-        return True
-    return any(fn.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"])
-
 def is_text_attachment(att: discord.Attachment) -> bool:
     ct = (att.content_type or "").lower()
     fn = (att.filename or "").lower()
@@ -277,6 +268,50 @@ async def collect_recent_messages_for_users(
         log.warning("collect_recent_messages_for_users err=%r", e)
         return out
 
+# ================= OFFENSE SIGNAL (SEM "ACUSAÇÃO KEYWORD") =================
+def looks_like_link_flood(text: str) -> bool:
+    t = text or ""
+    links = len(re.findall(r"https?://\S+", t, flags=re.I))
+    return links >= 2
+
+def looks_like_mention_flood(text: str) -> bool:
+    t = text or ""
+    mentions = t.count("<@")
+    return mentions >= 4
+
+def looks_like_emoji_flood(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    # sem alfanum e grande
+    if not any(ch.isalnum() for ch in t) and len(t) >= 18:
+        # repetição alta de poucos símbolos
+        if len(set(t)) <= 4:
+            return True
+    return False
+
+def looks_like_repeat_flood(text: str) -> bool:
+    t = (text or "").strip()
+    if len(t) < 40:
+        return False
+    # repetição de trecho
+    if re.search(r"(.{6,})\1\1", t):
+        return True
+    # muitas linhas iguais
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    if len(lines) >= 6 and len(set(lines)) <= 2:
+        return True
+    return False
+
+def offense_signal(offense_text: str, offender_recent: str) -> bool:
+    blob = (offense_text or "") + "\n" + (offender_recent or "")
+    return (
+        looks_like_link_flood(blob)
+        or looks_like_mention_flood(blob)
+        or looks_like_emoji_flood(blob)
+        or looks_like_repeat_flood(blob)
+    )
+
 # ================= OPENROUTER =================
 def get_model_payload_fields(default_model: Optional[str] = None) -> dict:
     if default_model:
@@ -324,24 +359,19 @@ async def call_openrouter(
             if isinstance(data, dict) and "error" in data:
                 msg = data["error"].get("message") if isinstance(data["error"], dict) else str(data["error"])
                 raise RuntimeError(f"OpenRouter error: {msg}")
-            try:
-                return data["choices"][0]["message"]["content"]
-            except Exception as e:
-                raise RuntimeError(f"OpenRouter bad response: {repr(e)} | data={str(data)[:600]}")
+            return data["choices"][0]["message"]["content"]
 
 # ================= PROMPTS =================
 def build_router_system_prompt(directives: list[str]) -> str:
     directives_block = "\n".join(f"- {x}" for x in directives) if directives else "(nenhuma)"
     return f"""
-Você é {BOT_NAME}. Você decide se é CONVERSA NORMAL ou REPORT/ACUSAÇÃO.
+Você é {BOT_NAME}. Você decide se é CONVERSA NORMAL ou REPORT.
 
-Regras:
-- Você está vendo REPORTER (quem marcou o bot) e ALVO (mensagem respondida).
-- REPORTER pode estar só conversando. Não presuma acusação.
-- Se for conversa normal: responda curto e SEM punir ninguém.
-- Se for report: você deve decidir quem é culpado com base no contexto real, incluindo histórico recente.
-- Se o report for mentira: pune o REPORTER (calúnia).
-- Se for verdade: pune o culpado real.
+REGRAS IMPORTANTES:
+- Default é "chat" (conversa). Só use "report" se o contexto mostra motivo real.
+- Não presuma que reply = denúncia.
+- Se o ALVO for o próprio bot, isso é sempre "chat".
+- Se não houver evidência clara de infração no texto/histórico do alvo, isso é "chat".
 
 Saída JSON:
 {{
@@ -360,8 +390,8 @@ def build_moderation_system_prompt(directives: list[str]) -> str:
     return f"""
 Você é {BOT_NAME}. Agora isso é um REPORT. Decida punição corretamente.
 
-Regras críticas:
-- Você DEVE punir SOMENTE se houver evidência literal no contexto.
+Regras:
+- Puna SOMENTE se houver evidência literal no contexto.
 - Se punir, inclua "evidence" com um trecho EXATO que está no contexto.
 - Sem evidência clara: action="reply" e punish_target="none".
 
@@ -421,7 +451,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # só reage quando marcado
     if client.user not in message.mentions:
         return
 
@@ -431,10 +460,10 @@ async def on_message(message: discord.Message):
     if not isinstance(message.author, discord.Member):
         return
 
-    controller = message.author
     if not message.guild:
         return
 
+    controller = message.author
     controller_text = (message.content or "").replace(f"<@{client.user.id}>", "").strip()
     low = controller_text.lower()
 
@@ -456,17 +485,21 @@ async def on_message(message: discord.Message):
 
     try:
         referenced = await resolve_reference_message(message)
-        target_msg = referenced or message
-        offender = target_msg.author if isinstance(target_msg.author, discord.Member) else controller
 
-        # diretivas
+        # ✅ FIX 1: se o reply é numa mensagem do BOT, isso é conversa normal
+        if referenced and referenced.author and getattr(referenced.author, "bot", False):
+            referenced = None
+
+        target_msg = referenced or message
+        offender = target_msg.author if isinstance(target_msg.author, discord.Member) else None
+
         async with state_lock:
             st = load_state_sync()
             directives = trim_directives_to_200_words(st.get("directives", []))
             st["directives"] = directives
             save_state_sync(st)
 
-        # anexos
+        # anexos de texto
         attachments: list[discord.Attachment] = []
         try:
             attachments.extend(list(getattr(target_msg, "attachments", [])))
@@ -485,9 +518,9 @@ async def on_message(message: discord.Message):
                 if blob:
                     text_blobs.append(f"Arquivo {att.filename}:\n{blob}")
 
-        # histórico recente de ambos
+        # histórico recente
         ctx_users = {int(controller.id)}
-        if isinstance(offender, discord.Member):
+        if offender:
             ctx_users.add(int(offender.id))
 
         per_user_logs = await collect_recent_messages_for_users(
@@ -498,12 +531,13 @@ async def on_message(message: discord.Message):
         )
 
         reporter_recent = "\n".join(per_user_logs.get(int(controller.id), [])) or "(sem histórico recente)"
-        offender_recent = "\n".join(per_user_logs.get(int(getattr(offender, "id", 0)), [])) or "(sem histórico recente)"
+        offender_recent = "\n".join(per_user_logs.get(int(offender.id), [])) if offender else "(sem alvo)"
 
         offense_text = (target_msg.content or "").strip()
+
         base_context = (
             f"REPORTER: {controller.display_name} (id {controller.id})\n"
-            f"ALVO: {getattr(offender, 'display_name', 'unknown')} (id {getattr(offender, 'id', '0')})\n\n"
+            f"ALVO: {(offender.display_name if offender else '(nenhum)')} (id {(offender.id if offender else '0')})\n\n"
             f"MENSAGEM DO ALVO (respondida):\n{offense_text}\n\n"
             f"MENSAGEM DO REPORTER (marcando o bot):\n{controller_text}\n\n"
             f"HISTÓRICO RECENTE DO REPORTER:\n{reporter_recent}\n\n"
@@ -512,43 +546,52 @@ async def on_message(message: discord.Message):
         if text_blobs:
             base_context += "\n\nANEXOS DE TEXTO:\n" + "\n\n".join(text_blobs)
 
-        # -------- PASSO 1: router (chat vs report) --------
+        # ✅ FIX 2: router "default chat" + "report só se houver sinal real"
+        # Se não tem alvo (sem reply), é chat.
+        # Se tem alvo mas NÃO tem sinal real, é chat.
+        auto_mode = "chat"
+        if offender and referenced:
+            if offense_signal(offense_text, offender_recent):
+                auto_mode = "report"
+
+        log.info(
+            "router start | reporter=%s(%s) offender=%s referenced=%s auto_mode=%s",
+            controller.display_name, controller.id,
+            (offender.display_name if offender else "(none)"),
+            bool(referenced),
+            auto_mode
+        )
+
         async with message.channel.typing():
             await asyncio.sleep(EXTRA_TYPING_SECONDS)
 
-        log.info("router start | reporter=%s(%s) offender=%s(%s) referenced=%s",
-                 controller.display_name, controller.id,
-                 getattr(offender, "display_name", "unknown"), getattr(offender, "id", "0"),
-                 bool(referenced))
+        # Se auto_mode for chat, nem chama router (responde rápido)
+        if auto_mode == "chat":
+            # resposta conversacional simples via router (opcional), mas sem risco de "report"
+            router_raw = await call_openrouter(
+                build_router_system_prompt(directives),
+                base_context,
+                end_user_id=str(controller.id),
+                force_json=True,
+                timeout_s=REQUEST_TIMEOUT_S,
+            )
+            router_js = extract_json_object(router_raw) or ""
+            try:
+                router = json.loads(router_js)
+                mode = (router.get("mode") or "chat").strip().lower()
+                reply = strip_questions((router.get("reply") or "").strip()) or "..."
+                # garante chat
+                await reply_soft(message, reply)
+                log.info("router done | forced_chat mode=%s | took=%.2fs", mode, time.time() - t0)
+                return
+            except Exception as e:
+                log.warning("forced_chat parse fail err=%r raw=%s", e, str(router_raw)[:200])
+                await reply_soft(message, strip_questions(router_raw) or "...")
+                return
 
-        router_raw = await call_openrouter(
-            build_router_system_prompt(directives),
-            base_context,
-            end_user_id=str(controller.id),
-            model_override=None,
-            force_json=True,
-            timeout_s=REQUEST_TIMEOUT_S,
-        )
+        # -------- MODE = REPORT (apenas quando há sinal real) --------
+        log.info("router done | mode=report(auto) | took=%.2fs", time.time() - t0)
 
-        router_js = extract_json_object(router_raw) or ""
-        try:
-            router = json.loads(router_js)
-        except Exception as e:
-            log.warning("router json parse fail err=%r raw=%s", e, str(router_raw)[:300])
-            await reply_soft(message, strip_questions(router_raw) or "...")
-            return
-
-        mode = (router.get("mode") or "chat").strip().lower()
-        router_reply = strip_questions((router.get("reply") or "").strip())
-
-        log.info("router done | mode=%s | took=%.2fs", mode, time.time() - t0)
-
-        # se for chat, responde e acabou
-        if mode == "chat":
-            await reply_soft(message, router_reply or "...")
-            return
-
-        # -------- PASSO 2: moderation decision --------
         async with message.channel.typing():
             await asyncio.sleep(EXTRA_TYPING_SECONDS)
 
@@ -575,15 +618,15 @@ async def on_message(message: discord.Message):
 
         d = parse_mod(js)
 
-        # -------- REPAIR: se JSON ruim ou evidence faltando quando timeout --------
+        # repair se veio sem evidence quando timeout
         if not d or (str(d.get("action", "")).lower() == "timeout" and not (d.get("evidence") or "").strip()):
             log.info("repair start | reason=bad_json_or_missing_evidence")
             repair_payload = (
                 "CONTEXTO:\n"
                 + base_context +
                 "\n\nSAÍDA ATUAL (quebrada/incompleta):\n"
-                + (js if js else str(mod_raw))
-                + "\n\nRepare para o formato exigido."
+                + js +
+                "\n\nRepare para o formato exigido."
             )
             repaired = await call_openrouter(
                 build_repair_system_prompt(),
@@ -609,29 +652,33 @@ async def on_message(message: discord.Message):
         seconds = int(d.get("timeout_seconds", 60) or 60)
         evidence = (d.get("evidence") or "").strip()
 
-        log.info("decision | action=%s punish_target=%s violation=%s seconds=%s evidence_len=%s",
-                 action, punish_target, violation, seconds, len(evidence))
+        log.info(
+            "decision | action=%s punish_target=%s violation=%s seconds=%s evidence_len=%s",
+            action, punish_target, violation, seconds, len(evidence)
+        )
 
-        # Gate final: se pediu timeout, exige evidence LITERAL no contexto.
-        # Se não bater, NÃO pune ninguém (e também NÃO pune reporter automaticamente).
+        # Gate final: timeout só com evidence literal no contexto
         if action == "timeout":
             if not evidence or evidence not in base_context:
-                log.warning("blocked timeout: invalid evidence. evidence=%r", evidence[:120])
-                await reply_soft(message, reply)  # responde normal
+                log.warning("blocked timeout: invalid evidence evidence=%r", evidence[:120])
+                await reply_soft(message, reply)
                 return
+
+        if action == "ignore":
+            return
+
+        if action == "reply":
+            await reply_soft(message, reply)
+            return
 
         # resolve punido
         punish_member: Optional[discord.Member] = None
         if punish_target == "reporter":
             punish_member = controller
-        elif punish_target == "offender" and isinstance(offender, discord.Member):
+        elif punish_target == "offender":
             punish_member = offender
 
-        # actions
-        if action == "ignore":
-            return
-
-        if action == "reply" or not punish_member:
+        if not punish_member:
             await reply_soft(message, reply)
             return
 
@@ -640,10 +687,6 @@ async def on_message(message: discord.Message):
             streak = bump_violation(punish_member.id, violation)
             if streak >= 3:
                 seconds = max(seconds, 300)
-            if violation == "hate" and streak >= 3:
-                seconds = max(seconds, 86400)
-            if violation == "threat" and streak >= 2:
-                seconds = max(seconds, 3600)
 
         seconds = min(max(60, seconds), 86400)
 
@@ -651,10 +694,8 @@ async def on_message(message: discord.Message):
 
         ok = await apply_timeout(punish_member, seconds)
         if not ok:
-            # não manda "ERRO" no canal, só loga
-            log.warning("timeout did not apply (permissions/role). bot_role_maybe_low or missing ModerateMembers.")
+            log.warning("timeout NOT applied (perm/role). check ModerateMembers and role hierarchy.")
         else:
-            # confirma no canal (sem "ERRO")
             minutes = max(1, seconds // 60)
             await message.channel.send(
                 f"🔇 {punish_member.mention}\nMotivo: {reason}\nDuração: {minutes} minuto(s)"
