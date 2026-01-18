@@ -26,13 +26,13 @@ BOT_NAME = "Edit_Japex"
 PUBLIC_MODEL_NAME = "Japex Neural Core – Ultimation"
 
 VERSION_MAJOR = 2
-VERSION_MINOR = 5
+VERSION_MINOR = 6
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 CHAT_GERAL_ID = int(os.getenv("CHAT_GERAL_ID", "1450594073596395548"))
 
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "420"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "520"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.55"))
 
 REQUEST_TIMEOUT_S = int(os.getenv("REQUEST_TIMEOUT_S", "45"))
@@ -195,7 +195,6 @@ def strip_questions(text: str) -> str:
 
 def sanitize_reply(text: str) -> str:
     t = strip_questions((text or "").strip())
-    # remove finais "perguntões" sem "?"
     t = re.sub(
         r"\b(como|quando|onde|qual|quais|quem|porque|por que|pq|oque|o que)\b\s*$",
         "",
@@ -206,10 +205,6 @@ def sanitize_reply(text: str) -> str:
     return t or "..."
 
 def bump_violation(uid: int, vtype: str) -> int:
-    now = time.time()
-    d = user_violation.get(uid)
-    if not d or (now - d.get("last_ts", 0) > HIST_TTL_S счита) if False else False  # dummy to avoid accidental unicode flags
-    # The above line is a no-op guard; keep code clean below.
     now = time.time()
     d = user_violation.get(uid)
     if not d or (now - d.get("last_ts", 0) > HIST_TTL_S) or d.get("type") != vtype:
@@ -283,14 +278,13 @@ async def collect_recent_messages_for_users(
         log.warning("collect_recent_messages_for_users err=%r", e)
         return out
 
-# ================= OFFENSE SIGNAL (SEM KEYWORDS) =================
-def looks_like_link_flood(text: str) -> bool:
-    links = len(re.findall(r"https?://\S+", text or "", flags=re.I))
-    return links >= 2
+# ================= CONTENT ANALYSIS (ALVO) =================
+# Isso NÃO é keyword de acusação. É análise do conteúdo real do alvo.
+def count_links(text: str) -> int:
+    return len(re.findall(r"https?://\S+", text or "", flags=re.I))
 
-def looks_like_mention_flood(text: str) -> bool:
-    mentions = (text or "").count("<@")
-    return mentions >= 4
+def count_mentions(text: str) -> int:
+    return (text or "").count("<@")
 
 def looks_like_emoji_flood(text: str) -> bool:
     t = (text or "").strip()
@@ -312,14 +306,40 @@ def looks_like_repeat_flood(text: str) -> bool:
         return True
     return False
 
+def looks_like_direct_insult(text: str) -> bool:
+    # heurística mínima: xingamento + alvo (menção ou "vc/você")
+    t = (text or "").lower()
+    if "<@" not in t and "vc" not in t and "você" not in t and "voce" not in t:
+        return False
+    # lista curta de xingamentos comuns (não é "palavra-chave de acusação"; é detectar ofensa real)
+    bad = ["idiota", "imbecil", "burro", "lixo", "verme", "animal", "otário", "otario", "arrombado", "vagabundo", "corno"]
+    return any(b in t for b in bad)
+
+def looks_like_threat(text: str) -> bool:
+    # heurística mínima: verbo violento + alvo (menção/vc/você)
+    t = (text or "").lower()
+    if "<@" not in t and "vc" not in t and "você" not in t and "voce" not in t:
+        return False
+    verbs = ["matar", "te matar", "espancar", "te pegar", "te arrebentar", "dar um tiro", "atirar", "vou te"]
+    return any(v in t for v in verbs)
+
 def offense_signal(offense_text: str, offender_recent: str) -> bool:
     blob = (offense_text or "") + "\n" + (offender_recent or "")
-    return (
-        looks_like_link_flood(blob)
-        or looks_like_mention_flood(blob)
-        or looks_like_emoji_flood(blob)
-        or looks_like_repeat_flood(blob)
-    )
+    # spam/flood
+    if count_links(blob) >= 2:
+        return True
+    if count_mentions(blob) >= 4:
+        return True
+    if looks_like_emoji_flood(blob):
+        return True
+    if looks_like_repeat_flood(blob):
+        return True
+    # conduta agressiva
+    if looks_like_direct_insult(blob):
+        return True
+    if looks_like_threat(blob):
+        return True
+    return False
 
 # ================= OPENROUTER =================
 def get_model_payload_fields(default_model: Optional[str] = None) -> dict:
@@ -373,24 +393,25 @@ async def call_openrouter(
 # ================= PROMPTS =================
 def build_chat_system_prompt() -> str:
     return f"""
-Você é {BOT_NAME}. Responda como um bot frio e objetivo.
+Você é {BOT_NAME}. Responda curto e objetivo.
 
 REGRAS:
-- Respostas curtas (1–2 linhas).
-- Não fale sobre "evidência", "violação", "moderação" ou "punição".
-- Não faça perguntas. Não use "?".
-- Não termine com palavras de pergunta tipo "como", "quando", "onde", "qual", "quem", "porque".
+- 1 a 2 linhas.
+- Não fale sobre evidência/violação/moderação/punição.
+- Não faça perguntas, não use "?".
 """.strip()
 
 def build_moderation_system_prompt(directives: list[str]) -> str:
     directives_block = "\n".join(f"- {x}" for x in directives) if directives else "(nenhuma)"
     return f"""
-Você é {BOT_NAME}. Agora isso é um REPORT. Decida punição corretamente.
+Você é {BOT_NAME}. Isso é um REPORT (denúncia real). Decida punição corretamente.
 
 Regras:
+- Analise o CONTEXTO do ALVO (mensagem + histórico recente).
+- Se o report for mentira, puna o REPORTER por calúnia.
+- Se for verdade, puna o ALVO.
 - Puna SOMENTE se houver evidência literal no contexto.
-- Se punir, inclua "evidence" com um trecho EXATO que está no contexto.
-- Sem evidência clara: action="reply" e punish_target="none".
+- Se punir, "evidence" precisa ser um trecho EXATO que aparece no contexto.
 
 Saída JSON:
 {{
@@ -405,14 +426,11 @@ Saída JSON:
 
 Responda SOMENTE JSON válido. Sem markdown.
 
-Diretivas:
+ORDENS:
 {directives_block}
 
 REGRAS ABSOLUTAS:
 {REGRAS_TXT}
-
-BASE DE DADOS:
-{DADOS_TXT}
 """.strip()
 
 def build_repair_system_prompt() -> str:
@@ -421,7 +439,7 @@ Você vai REPARAR uma saída JSON.
 
 Regras:
 - Devolva SOMENTE um JSON válido no formato exigido.
-- Não invente evidência. "evidence" precisa ser um trecho literal que aparece no contexto fornecido.
+- Não invente evidência. "evidence" precisa existir literalmente no contexto fornecido.
 """.strip()
 
 # ================= ACTION HELPERS =================
@@ -489,7 +507,7 @@ async def on_message(message: discord.Message):
     try:
         referenced = await resolve_reference_message(message)
 
-        # ✅ FIX: se reply em mensagem do bot -> tratar como CHAT
+        # reply em mensagem do bot => CHAT
         if referenced and referenced.author and getattr(referenced.author, "bot", False):
             referenced = None
 
@@ -524,7 +542,7 @@ async def on_message(message: discord.Message):
                 if blob:
                     text_blobs.append(f"Arquivo {att.filename}:\n{blob}")
 
-        # histórico recente de ambos
+        # histórico recente (reporter + alvo)
         ctx_users = {int(controller.id)}
         if offender:
             ctx_users.add(int(offender.id))
@@ -552,29 +570,27 @@ async def on_message(message: discord.Message):
         if text_blobs:
             base_context += "\n\nANEXOS DE TEXTO:\n" + "\n\n".join(text_blobs)
 
-        # ================= MODE DECISION =================
-        # Default é CHAT sempre.
-        # Só vira REPORT quando:
-        # - existe offender (tem reply em humano)
-        # - e o texto/histórico do ALVO tem sinal real de infração (sem keyword).
+        # ================= MODE DECISION (SEM KEYWORD DE ACUSAÇÃO) =================
+        # Default CHAT.
+        # Só vira REPORT se existir alvo humano + conteúdo do alvo indicar infração provável.
         auto_mode = "chat"
         if offender and referenced:
             if offense_signal(offense_text, offender_recent):
                 auto_mode = "report"
 
         log.info(
-            "mode decision | auto_mode=%s | reporter=%s(%s) offender=%s referenced=%s",
+            "mode decision | auto_mode=%s | reporter=%s(%s) offender=%s referenced=%s took=%.2fs",
             auto_mode,
             controller.display_name, controller.id,
             (offender.display_name if offender else "(none)"),
-            bool(referenced)
+            bool(referenced),
+            time.time() - t0
         )
 
-        # ================= CHAT FLOW =================
+        # ================= CHAT =================
         if auto_mode == "chat":
             async with message.channel.typing():
                 await asyncio.sleep(EXTRA_TYPING_SECONDS)
-
             try:
                 chat_raw = await call_openrouter(
                     build_chat_system_prompt(),
@@ -587,10 +603,9 @@ async def on_message(message: discord.Message):
             except Exception as e:
                 log.error("chat call failed err=%r", e)
                 await reply_soft(message, "...")
-            log.info("chat done | took=%.2fs", time.time() - t0)
             return
 
-        # ================= REPORT FLOW =================
+        # ================= REPORT =================
         async with message.channel.typing():
             await asyncio.sleep(EXTRA_TYPING_SECONDS)
 
@@ -622,9 +637,9 @@ async def on_message(message: discord.Message):
 
         d = parse_mod(js)
 
-        # repair se veio sem evidence no timeout, ou parse falhou
+        # repair se vier quebrado ou timeout sem evidence
         if (not d) or (str(d.get("action", "")).lower() == "timeout" and not (d.get("evidence") or "").strip()):
-            log.info("repair start | reason=bad_json_or_missing_evidence")
+            log.info("repair start | bad_json_or_missing_evidence")
             repair_payload = (
                 "CONTEXTO:\n"
                 + base_context +
@@ -665,7 +680,7 @@ async def on_message(message: discord.Message):
             action, punish_target, violation, seconds, len(evidence)
         )
 
-        # Gate final: timeout só com evidence literal no contexto
+        # Gate: timeout só se evidence literal no contexto
         if action == "timeout":
             if not evidence or evidence not in base_context:
                 log.warning("blocked timeout: invalid evidence evidence=%r", evidence[:120])
@@ -700,14 +715,12 @@ async def on_message(message: discord.Message):
 
         ok = await apply_timeout(punish_member, seconds)
         if not ok:
-            log.warning("timeout NOT applied. Check: Moderate Members permission + bot role above target.")
+            log.warning("timeout NOT applied. Check: Moderate Members perm + bot role above target.")
         else:
             minutes = max(1, seconds // 60)
             await message.channel.send(
                 f"🔇 {punish_member.mention}\nMotivo: {reason}\nDuração: {minutes} minuto(s)"
             )
-
-        log.info("report done | took=%.2fs", time.time() - t0)
 
     except Exception as e:
         log.error("on_message unexpected err=%r", e)
